@@ -1,0 +1,8 @@
+apiVersion: apiserver.config.miloapis.com/v1alpha1
+kind: TLSCertificateOperator
+metricsServer:
+  bindAddress: ":9090"
+  secureServing: false
+webhookServer: {}
+discovery:
+  mode: single

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: certificates-metrics
+  labels:
+    control-plane: certificates
+    app.kubernetes.io/name: certificates
+spec:
+  ports:
+    - name: http-metrics
+      port: 9090
+      protocol: TCP
+      targetPort: 9090
+  selector:
+    control-plane: certificates
+    app.kubernetes.io/name: certificates

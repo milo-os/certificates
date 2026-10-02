@@ -1,0 +1,9 @@
+apiVersion: discovery.miloapis.com/v1alpha1
+kind: DiscoveryContextPolicy
+metadata:
+  name: certificates-resources
+spec:
+  rules:
+    - group: certificates.miloapis.com
+      resources: ["tlscertificates"]
+      contexts: ["Project"]

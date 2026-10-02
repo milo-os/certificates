@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: certificates-metrics
+  labels:
+    control-plane: certificates
+    app.kubernetes.io/name: certificates
+spec:
+  endpoints:
+    - path: /metrics
+      port: http-metrics
+      scheme: http
+  selector:
+    matchLabels:
+      control-plane: certificates
+      app.kubernetes.io/name: certificates

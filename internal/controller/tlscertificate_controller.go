@@ -405,8 +405,8 @@ func (r *TLSCertificateReconciler) observeChallenges(ctx context.Context, tc *ce
 			Key:     ch.Spec.Key,
 			State:   challengeState(ch.Status.State),
 		})
-		if ch.Status.Reason != "" {
-			acmeErr = ch.Status.Reason
+		if reason := failureReason(ch.Status.State, ch.Status.Reason); reason != "" {
+			acmeErr = reason
 		}
 	}
 	slices.SortFunc(observed, func(a, b certificatesv1alpha1.ACMEChallenge) int {
@@ -415,9 +415,16 @@ func (r *TLSCertificateReconciler) observeChallenges(ctx context.Context, tc *ce
 	tc.Status.Challenges = observed
 
 	if acmeErr == "" && latest != nil {
-		acmeErr = latest.Status.Reason
+		acmeErr = failureReason(latest.Status.State, latest.Status.Reason)
 	}
 	return truncate(acmeErr), nil
+}
+
+func failureReason(state acmev1.State, reason string) string {
+	if state == acmev1.Invalid || state == acmev1.Errored || state == acmev1.Expired {
+		return reason
+	}
+	return ""
 }
 
 func challengeState(s acmev1.State) certificatesv1alpha1.ChallengeState {
@@ -435,17 +442,14 @@ func (r *TLSCertificateReconciler) observeCertificate(tc *certificatesv1alpha1.T
 	tc.Status.RenewalTime = cert.Status.RenewalTime
 
 	issuing := certManagerCondition(cert, cmv1.CertificateConditionIssuing)
-	msg := ""
-	if issuing != nil {
-		msg = truncate(issuing.Message)
-	}
-	if acmeErr != "" {
-		msg = acmeErr
-	}
+	msg := acmeErr
 	switch {
 	case issuing != nil && issuing.Status == cmmeta.ConditionTrue:
 		r.setCondition(tc, certificatesv1alpha1.ConditionIssuing, metav1.ConditionTrue, "OrderInFlight", msg)
 	case issuing != nil && issuing.Reason == "Failed":
+		if msg == "" {
+			msg = truncate(issuing.Message)
+		}
 		r.setCondition(tc, certificatesv1alpha1.ConditionIssuing, metav1.ConditionFalse, "IssuanceFailed", msg)
 	default:
 		r.setCondition(tc, certificatesv1alpha1.ConditionIssuing, metav1.ConditionFalse, "NoOrderInFlight", "No ACME order is in flight.")

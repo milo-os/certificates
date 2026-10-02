@@ -255,13 +255,27 @@ var _ = Describe("TLSCertificate reconciler", func() {
 			State:   certificatesv1alpha1.ChallengeStatePending,
 		})))
 
-		By("reporting an in-flight order with its ACME error")
+		By("reporting an in-flight order without an error while a challenge makes routine progress")
 		cert.Status.Conditions = []cmv1.CertificateCondition{{
 			Type:   cmv1.CertificateConditionIssuing,
 			Status: cmmeta.ConditionTrue,
 			Reason: "Issuing",
 		}}
 		Expect(k8sClient.Status().Update(ctx, &cert)).To(Succeed())
+		challenge.Status.State = acmev1.Pending
+		challenge.Status.Reason = "Waiting for HTTP-01 challenge propagation"
+		Expect(k8sClient.Status().Update(ctx, challenge)).To(Succeed())
+		Eventually(get(tc)).Should(And(
+			hasCondition(certificatesv1alpha1.ConditionIssuing, metav1.ConditionTrue, "OrderInFlight"),
+			WithTransform(func(tc *certificatesv1alpha1.TLSCertificate) string {
+				return condition(tc, certificatesv1alpha1.ConditionIssuing).Message
+			}, BeEmpty()),
+		))
+		Consistently(get(tc), "2s").Should(WithTransform(func(tc *certificatesv1alpha1.TLSCertificate) string {
+			return condition(tc, certificatesv1alpha1.ConditionIssuing).Message
+		}, BeEmpty()))
+
+		By("reporting an in-flight order with its ACME error")
 		challenge.Status.State = acmev1.Invalid
 		challenge.Status.Reason = "connection refused"
 		Expect(k8sClient.Status().Update(ctx, challenge)).To(Succeed())

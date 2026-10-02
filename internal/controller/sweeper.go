@@ -4,6 +4,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -120,6 +122,7 @@ func (s *OrphanSweeper) Sweep(ctx context.Context) error {
 		}
 	}
 
+	var errs []error
 	for certName, labels := range owners {
 		orphaned, err := s.ownerMissing(ctx, labels)
 		if err != nil {
@@ -130,7 +133,9 @@ func (s *OrphanSweeper) Sweep(ctx context.Context) error {
 			continue
 		}
 		if err := deleteServiceResources(ctx, c, s.CertificateNamespace, certName); err != nil {
-			return err
+			log.FromContext(ctx).Error(err, "removing orphaned certificate", "certificate", certName)
+			errs = append(errs, err)
+			continue
 		}
 		if req, ok := upstreamRequest(labels); ok {
 			delegationUnconfirmedSeconds.DeleteLabelValues(string(req.ClusterName), req.Namespace, req.Name)
@@ -154,7 +159,9 @@ func (s *OrphanSweeper) Sweep(ctx context.Context) error {
 			continue
 		}
 		if err := client.IgnoreNotFound(c.Delete(ctx, anchor)); err != nil {
-			return err
+			log.FromContext(ctx).Error(err, "removing delegation anchor", "anchor", anchor.Name)
+			errs = append(errs, fmt.Errorf("deleting delegation anchor %s/%s: %w", anchor.Namespace, anchor.Name, err))
+			continue
 		}
 		delete(s.missingSince, anchor.Name)
 		log.FromContext(ctx).Info("removed delegation anchor of a deleted namespace", "anchor", anchor.Name)
@@ -165,7 +172,7 @@ func (s *OrphanSweeper) Sweep(ctx context.Context) error {
 			delete(s.missingSince, certName)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (s *OrphanSweeper) ownerMissing(ctx context.Context, labels map[string]string) (bool, error) {

@@ -4,6 +4,43 @@ Certificates, built in. The certificate service issues publicly trusted TLS
 certificates for hostnames in Milo project control planes and delivers them as
 `kubernetes.io/tls` Secrets beside the request.
 
+A project asks for a certificate with a `TLSCertificate`:
+
+```yaml
+apiVersion: certificates.miloapis.com/v1alpha1
+kind: TLSCertificate
+metadata:
+  name: web
+spec:
+  dnsNames:
+    - "*.example.com"
+    - example.com
+  issuance: Auto
+```
+
+- `issuance: Auto` uses DNS01 when any name is a wildcard and HTTP01 otherwise.
+  HTTP01 cannot issue wildcards.
+- The admission webhook enforces these rules and limits who may write
+  `TLSCertificates`; see the identity flags below.
+- The service does not verify that the project controls the names. Callers
+  create a `TLSCertificate` only for names they have already verified. Names
+  under `--denied-domain-suffixes` are always rejected, as are public
+  suffixes and names whose top-level domain is not a public ICANN domain.
+- `dnsNames`, `issuance` and `secretName` are immutable.
+- Conditions: `Accepted`, `DNSDelegationReady` (DNS01 only), `Issuing` and
+  `Ready`.
+
+## Flags
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--denied-domain-suffixes` | `datumproxy.net,datum.net,datum-staging.net,datumdomains.net,miloapis.com,datumapis.com` | Domains never issued for, including every name beneath them |
+| `--allowed-writer-identities` | `system:control@networking.datumapis.com` | Usernames allowed to create, change or delete a `TLSCertificate`. Empty turns off every identity check except the status one |
+| `--service-identities` | empty | The service's usernames in project control planes. Only they may write status. Required when the webhook is enabled |
+| `--allowed-deleter-identities` | `system:control@platform.miloapis.com`, kube-system namespace-controller and generic-garbage-collector | Extra usernames allowed to delete a `TLSCertificate` and make metadata-only changes, such as removing finalizers: whatever deletes namespaces and collects garbage in project control planes. Milo's controller manager uses `system:control@platform.miloapis.com`. Preview environments use `control@platform.miloapis.com`, without the `system:` prefix, and must override this flag. The kube-system ServiceAccounts apply only to a stock kube-controller-manager |
+| `--server-config` | empty | Path to the operator config file |
+| `--leader-elect`, `--leader-elect-namespace`, `--health-probe-bind-address` | | Standard manager flags |
+
 ## Prerequisites
 
 | Tool | Version | Install |

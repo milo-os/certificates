@@ -7,6 +7,7 @@ resources:
   - ../../base/crd
   - ../../base/manager
   - ../../base/certmanager
+  - secret-writer.yaml
 
 components:
   - ../../components/namespace
@@ -24,6 +25,13 @@ configMapGenerator:
       disableNameSuffixHash: true
 
 patches:
+  - target:
+      kind: Deployment
+      name: certificates-manager
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --service-identities=system:serviceaccount:certificates-system:certificates-manager
   - target:
       kind: Certificate
       name: certificates-serving-cert

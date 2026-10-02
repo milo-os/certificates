@@ -20,10 +20,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	examplev1alpha1 "go.miloapis.com/controller-template/api/v1alpha1"
-	"go.miloapis.com/controller-template/internal/config"
-	"go.miloapis.com/controller-template/internal/controller"
-	webhookv1alpha1 "go.miloapis.com/controller-template/internal/webhook/v1alpha1"
+	examplev1alpha1 "go.miloapis.com/certificates/api/v1alpha1"
+	"go.miloapis.com/certificates/internal/config"
+	"go.miloapis.com/certificates/internal/controller"
+	webhookv1alpha1 "go.miloapis.com/certificates/internal/webhook/v1alpha1"
 )
 
 var (
@@ -52,19 +52,19 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "operator",
-		Short: "Run the controller-template operator (controller-runtime manager)",
+		Short: "Run the certificates operator (controller-runtime manager)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 			setupLog := ctrl.Log.WithName("setup")
-			setupLog.Info("starting controller-template operator",
+			setupLog.Info("starting certificates operator",
 				"version", info.Version,
 				"gitCommit", info.GitCommit,
 				"gitTreeState", info.GitTreeState,
 				"buildDate", info.BuildDate,
 			)
 
-			var serverConfig config.ControllerTemplateOperator
+			var serverConfig config.TLSCertificateOperator
 			var configData []byte
 			if len(serverConfigFile) > 0 {
 				var err error
@@ -109,19 +109,19 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 				WebhookServer:           webhookServer,
 				HealthProbeBindAddress:  probeAddr,
 				LeaderElection:          enableLeaderElection,
-				LeaderElectionID:        "controller-template.miloapis.com",
+				LeaderElectionID:        "certificates.miloapis.com",
 				LeaderElectionNamespace: leaderElectionNamespace,
 			})
 			if err != nil {
 				return fmt.Errorf("starting manager: %w", err)
 			}
 
-			if err = (&controller.ResourceReconciler{}).SetupWithManager(mgr); err != nil {
-				return fmt.Errorf("creating Resource controller: %w", err)
+			if err = (&controller.TLSCertificateReconciler{}).SetupWithManager(mgr); err != nil {
+				return fmt.Errorf("creating TLSCertificate controller: %w", err)
 			}
 
 			if err = webhookv1alpha1.SetupWebhookWithManager(mgr); err != nil {
-				return fmt.Errorf("creating Resource webhook: %w", err)
+				return fmt.Errorf("creating TLSCertificate webhook: %w", err)
 			}
 
 			if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

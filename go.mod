@@ -1,4 +1,4 @@
-module go.miloapis.com/controller-template
+module go.miloapis.com/certificates
 
 go 1.25.0
 

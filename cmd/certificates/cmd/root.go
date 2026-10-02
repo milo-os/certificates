@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Package cmd contains the cobra command definitions for the controller-template binary.
+// Package cmd contains the cobra command definitions for the certificates binary.
 package cmd
 
 import "github.com/spf13/cobra"
@@ -13,13 +13,13 @@ type BuildInfo struct {
 	BuildDate    string
 }
 
-// NewRootCommand returns the controller-template root cobra command.
-// It has no RunE — invoking 'controller-template' with no subcommand prints help.
+// NewRootCommand returns the certificates root cobra command.
+// It has no RunE — invoking 'certificates' with no subcommand prints help.
 func NewRootCommand(info BuildInfo) *cobra.Command {
 	root := &cobra.Command{
-		Use:   "controller-template",
+		Use:   "certificates",
 		Short: "Milo control plane controller template",
-		// No RunE — 'controller-template' with no subcommand prints help.
+		// No RunE — 'certificates' with no subcommand prints help.
 	}
 	root.AddCommand(newOperatorCommand(info))
 	return root

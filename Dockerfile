@@ -1,4 +1,4 @@
-# Build the controller-template binary
+# Build the certificates binary
 FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
 ARG TARGETOS
 ARG TARGETARCH
@@ -30,12 +30,12 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
       -X main.gitCommit=${GIT_COMMIT} \
       -X main.gitTreeState=${GIT_TREE_STATE} \
       -X main.buildDate=${BUILD_DATE}" \
-    -o controller-template ./cmd/controller-template
+    -o certificates ./cmd/certificates
 
-# Use distroless as minimal base image to package the controller-template binary
+# Use distroless as minimal base image to package the certificates binary
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
-COPY --from=builder /workspace/controller-template .
+COPY --from=builder /workspace/certificates .
 USER 65532:65532
 
-ENTRYPOINT ["/controller-template"]
+ENTRYPOINT ["/certificates"]

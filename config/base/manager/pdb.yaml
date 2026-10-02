@@ -1,13 +1,13 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: controller-template-manager
+  name: certificates-manager
   labels:
-    app.kubernetes.io/name: controller-template
+    app.kubernetes.io/name: certificates
     app.kubernetes.io/managed-by: kustomize
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      control-plane: controller-template
-      app.kubernetes.io/name: controller-template
+      control-plane: certificates
+      app.kubernetes.io/name: certificates

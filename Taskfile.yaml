@@ -2,7 +2,7 @@ version: '3'
 
 vars:
   TOOL_DIR: "{{.USER_WORKING_DIR}}/bin"
-  IMAGE_NAME: "ghcr.io/milo-os/controller-template"
+  IMAGE_NAME: "ghcr.io/milo-os/certificates"
   IMAGE_TAG: "dev"
   TEST_INFRA_CLUSTER_NAME: "test-infra"
   TEST_INFRA_REPO_REF: 'v0.6.0'
@@ -45,7 +45,7 @@ tasks:
       - |
         set -e
         echo "Generating manifests..."
-        {{.TOOL_DIR}}/controller-gen rbac:roleName=controller-template-manager \
+        {{.TOOL_DIR}}/controller-gen rbac:roleName=certificates-manager \
           crd:generateEmbeddedObjectMeta=true \
           webhook \
           paths="./..." \
@@ -58,11 +58,11 @@ tasks:
     silent: true
 
   build:
-    desc: Build the controller-template binary
+    desc: Build the certificates binary
     cmds:
       - |
         set -e
-        echo "Building controller-template..."
+        echo "Building certificates..."
         mkdir -p {{.TOOL_DIR}}
 
         GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -80,8 +80,8 @@ tasks:
                     -X 'main.gitCommit=${GIT_COMMIT}' \
                     -X 'main.gitTreeState=${GIT_TREE_STATE}' \
                     -X 'main.buildDate=${BUILD_DATE}'" \
-          -o {{.TOOL_DIR}}/controller-template ./cmd/controller-template
-        echo "Binary built: {{.TOOL_DIR}}/controller-template"
+          -o {{.TOOL_DIR}}/certificates ./cmd/certificates
+        echo "Binary built: {{.TOOL_DIR}}/certificates"
     silent: true
 
   test:
@@ -146,12 +146,12 @@ tasks:
 
   # Development tasks
   dev:build:
-    desc: Build the controller-template container image for development
+    desc: Build the certificates container image for development
     silent: true
     cmds:
       - |
         set -e
-        echo "Building controller-template container image: {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
+        echo "Building certificates container image: {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
 
         GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
         VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
@@ -170,7 +170,7 @@ tasks:
         echo "Successfully built {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
 
   dev:load:
-    desc: Load the controller-template container image into the kind cluster
+    desc: Load the certificates container image into the kind cluster
     silent: true
     cmds:
       - |
@@ -189,7 +189,7 @@ tasks:
       - task: dev:deploy
 
   dev:deploy:
-    desc: Deploy controller-template using dev overlay
+    desc: Deploy certificates using dev overlay
     silent: true
     cmds:
       - |
@@ -207,7 +207,7 @@ tasks:
 
         echo ""
         echo "----------------------------------------------------------------------"
-        echo "Stage 2: Deploying controller-template (Dev Overlay)"
+        echo "Stage 2: Deploying certificates (Dev Overlay)"
         echo "----------------------------------------------------------------------"
         until task test-infra:kubectl -- apply -k config/overlays/dev; do
           echo "  - Apply failed (likely webhook propagation), retrying in 5s..."
@@ -218,10 +218,10 @@ tasks:
         echo "----------------------------------------------------------------------"
         echo "Stage 3: Verification"
         echo "----------------------------------------------------------------------"
-        task test-infra:kubectl -- rollout status -n controller-template-system deployment/controller-template-manager --timeout=120s || echo "  - Controller not ready yet"
+        task test-infra:kubectl -- rollout status -n certificates-system deployment/certificates-manager --timeout=120s || echo "  - Controller not ready yet"
 
         echo ""
-        echo "controller-template successfully deployed in dev mode!"
+        echo "certificates successfully deployed in dev mode!"
         echo "----------------------------------------------------------------------"
 
   dev:redeploy:
@@ -232,9 +232,9 @@ tasks:
     cmds:
       - |
         set -e
-        echo "Redeploying controller-template (dev)..."
-        task test-infra:kubectl -- delete pod -n controller-template-system -l app.kubernetes.io/name=controller-template --wait=false || echo "Deployment not found, run 'task dev:deploy' first"
-        task test-infra:kubectl -- rollout status -n controller-template-system deployment/controller-template-manager --timeout=120s || true
+        echo "Redeploying certificates (dev)..."
+        task test-infra:kubectl -- delete pod -n certificates-system -l app.kubernetes.io/name=certificates --wait=false || echo "Deployment not found, run 'task dev:deploy' first"
+        task test-infra:kubectl -- rollout status -n certificates-system deployment/certificates-manager --timeout=120s || true
         echo "Redeployment complete!"
     silent: true
 
@@ -326,8 +326,8 @@ tasks:
         set -e
         GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
         VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
-        docker build -t "ghcr.io/milo-os/controller-template-ui:dev" ui/
-        echo "Built ghcr.io/milo-os/controller-template-ui:dev"
+        docker build -t "ghcr.io/milo-os/certificates-ui:dev" ui/
+        echo "Built ghcr.io/milo-os/certificates-ui:dev"
     silent: true
 
   # E2E Testing

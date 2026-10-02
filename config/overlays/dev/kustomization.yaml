@@ -1,7 +1,7 @@
-namespace: controller-template-system
+namespace: certificates-system
 
 images:
-  - name: ghcr.io/milo-os/controller-template
+  - name: ghcr.io/milo-os/certificates
     newTag: dev
 
 resources:
@@ -15,7 +15,7 @@ components:
   - ../../components/controller_rbac
 
 configMapGenerator:
-  - name: controller-template-config
+  - name: certificates-config
     behavior: replace
     files:
       - config.yaml
@@ -26,7 +26,7 @@ patches:
   - path: dev_patch.yaml
   - target:
       kind: Deployment
-      name: controller-template-manager
+      name: certificates-manager
     patch: |-
       - op: remove
         path: /spec/template/spec/containers/0/volumeMounts/1
@@ -34,20 +34,20 @@ patches:
         path: /spec/template/spec/volumes/1
   - target:
       kind: Certificate
-      name: controller-template-serving-cert
+      name: certificates-serving-cert
     patch: |-
       - op: replace
         path: /spec/dnsNames
         value:
-          - controller-template-webhook.controller-template-system.svc
-          - controller-template-webhook.controller-template-system.svc.cluster.local
+          - certificates-webhook.certificates-system.svc
+          - certificates-webhook.certificates-system.svc.cluster.local
 
 replacements:
   - source:
       kind: Certificate
       group: cert-manager.io
       version: v1
-      name: controller-template-serving-cert
+      name: certificates-serving-cert
       fieldPath: .metadata.namespace
     targets:
       - select:
@@ -70,7 +70,7 @@ replacements:
       kind: Certificate
       group: cert-manager.io
       version: v1
-      name: controller-template-serving-cert
+      name: certificates-serving-cert
       fieldPath: .metadata.name
     targets:
       - select:

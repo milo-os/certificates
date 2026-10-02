@@ -14,14 +14,14 @@ patches:
 - patch: |-
     - op: replace
       path: /metadata/name
-      value: controller-template-mutating
+      value: certificates-mutating
   target:
     kind: MutatingWebhookConfiguration
     name: mutating-webhook-configuration
 - patch: |-
     - op: replace
       path: /metadata/name
-      value: controller-template-validating
+      value: certificates-validating
   target:
     kind: ValidatingWebhookConfiguration
     name: validating-webhook-configuration

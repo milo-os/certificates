@@ -1,0 +1,7 @@
+apiVersion: certificates.miloapis.com/v1alpha1
+kind: TLSCertificate
+metadata:
+  name: example-tlscertificate
+  namespace: default
+spec:
+  description: "An example tlscertificate managed by the certificates."

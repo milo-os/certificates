@@ -25,8 +25,8 @@ import (
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +k8s:defaulter-gen=true
 
-// ControllerTemplateOperator is the configuration for the controller-template operator.
-type ControllerTemplateOperator struct {
+// TLSCertificateOperator is the configuration for the certificates operator.
+type TLSCertificateOperator struct {
 	metav1.TypeMeta
 
 	MetricsServer MetricsServerConfig `json:"metricsServer"`
@@ -37,7 +37,7 @@ type ControllerTemplateOperator struct {
 	WebhookServer *WebhookServerConfig `json:"webhookServer,omitempty"`
 
 	// KubeconfigPath is the path to the kubeconfig file pointing at the Milo
-	// control plane API server where resources are stored. When empty, the
+	// control plane API server where tlscertificates are stored. When empty, the
 	// controller falls back to in-cluster config / $KUBECONFIG via
 	// ctrl.GetConfig(), which is useful for local development.
 	KubeconfigPath string `json:"kubeconfigPath,omitempty"`
@@ -46,7 +46,7 @@ type ControllerTemplateOperator struct {
 // RestConfig returns the *rest.Config used to connect to the Milo control plane.
 // When KubeconfigPath is empty it falls back to the standard
 // controller-runtime config resolution (in-cluster / $KUBECONFIG).
-func (c *ControllerTemplateOperator) RestConfig() (*rest.Config, error) {
+func (c *TLSCertificateOperator) RestConfig() (*rest.Config, error) {
 	if c.KubeconfigPath == "" {
 		return ctrl.GetConfig()
 	}
@@ -202,15 +202,15 @@ func SetDefaults_TLSConfig(obj *TLSConfig) {
 	}
 }
 
-// SetDefaults_ControllerTemplateOperator sets defaults for ControllerTemplateOperator.
-// The generated SetObjectDefaults_ControllerTemplateOperator handles calling nested
+// SetDefaults_TLSCertificateOperator sets defaults for TLSCertificateOperator.
+// The generated SetObjectDefaults_TLSCertificateOperator handles calling nested
 // defaults (MetricsServerConfig, WebhookServerConfig, TLSConfig), so this
 // function only sets top-level defaults.
-func SetDefaults_ControllerTemplateOperator(obj *ControllerTemplateOperator) {
+func SetDefaults_TLSCertificateOperator(obj *TLSCertificateOperator) {
 	// Top-level defaults are handled by nested SetDefaults_* functions
-	// which are called by the generated SetObjectDefaults_ControllerTemplateOperator.
+	// which are called by the generated SetObjectDefaults_TLSCertificateOperator.
 }
 
 func init() {
-	SchemeBuilder.Register(&ControllerTemplateOperator{})
+	SchemeBuilder.Register(&TLSCertificateOperator{})
 }

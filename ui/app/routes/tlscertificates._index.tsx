@@ -18,68 +18,68 @@ import {
 } from "@datum-cloud/datum-ui/table";
 import { fetchK8s } from "~/lib/k8s.server";
 import { phaseBadgeProps, relativeAge } from "~/lib/format";
-import type { KubeList, Resource } from "~/lib/types";
-import { resourcesPath } from "~/lib/api";
+import type { KubeList, TLSCertificate } from "~/lib/types";
+import { tlscertificatesPath } from "~/lib/api";
 
 interface LoaderData {
-  resources: Resource[];
+  tlscertificates: TLSCertificate[];
   error?: string;
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
-    const result = await fetchK8s<KubeList<Resource>>(
+    const result = await fetchK8s<KubeList<TLSCertificate>>(
       request,
-      resourcesPath()
+      tlscertificatesPath()
     );
-    return json({ resources: result.items ?? [] } satisfies LoaderData);
+    return json({ tlscertificates: result.items ?? [] } satisfies LoaderData);
   } catch (e) {
     return json({
-      resources: [],
+      tlscertificates: [],
       error: e instanceof Error ? e.message : String(e),
     } satisfies LoaderData);
   }
 }
 
-function matchesQuery(resource: Resource, q: string): boolean {
+function matchesQuery(tlscertificate: TLSCertificate, q: string): boolean {
   if (!q) return true;
   const needle = q.toLowerCase();
-  return [resource.metadata.name, resource.spec.description ?? ""].some((h) =>
+  return [tlscertificate.metadata.name, tlscertificate.spec.description ?? ""].some((h) =>
     h.toLowerCase().includes(needle)
   );
 }
 
-export default function ResourcesIndex() {
-  const { resources, error } = useLoaderData<typeof loader>() as LoaderData;
+export default function TLSCertificatesIndex() {
+  const { tlscertificates, error } = useLoaderData<typeof loader>() as LoaderData;
   const [query, setQuery] = useState("");
 
   const filtered = useMemo(
-    () => resources.filter((r) => matchesQuery(r, query.trim())),
-    [resources, query]
+    () => tlscertificates.filter((r) => matchesQuery(r, query.trim())),
+    [tlscertificates, query]
   );
 
   return (
     <div className="flex flex-col gap-4 px-6 py-4">
       <PageTitle
-        title="Resources"
-        description="Resources managed by the controller on the Milo control plane."
+        title="TLSCertificates"
+        description="TLSCertificates managed by the controller on the Milo control plane."
         actionsPosition="inline"
       />
 
       {error ? (
         <Card>
           <CardContent className="py-6">
-            <p className="text-sm font-medium">Failed to load resources</p>
+            <p className="text-sm font-medium">Failed to load tlscertificates</p>
             <p className="text-sm text-muted-foreground mt-1">{error}</p>
-            <a href="/resources" className="text-sm text-primary underline mt-2 inline-block">
+            <a href="/tlscertificates" className="text-sm text-primary underline mt-2 inline-block">
               Retry
             </a>
           </CardContent>
         </Card>
-      ) : resources.length === 0 ? (
+      ) : tlscertificates.length === 0 ? (
         <EmptyContent
-          title="no resources found."
-          subtitle="Resources will appear here once they are created on the Milo control plane."
+          title="no tlscertificates found."
+          subtitle="TLSCertificates will appear here once they are created on the Milo control plane."
           size="lg"
         />
       ) : (
@@ -88,7 +88,7 @@ export default function ResourcesIndex() {
             <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
               type="search"
-              placeholder="Search resources…"
+              placeholder="Search tlscertificates…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               className="pl-9"
@@ -121,7 +121,7 @@ export default function ResourcesIndex() {
                         <TableRow key={`${r.metadata.namespace}/${r.metadata.name}`}>
                           <TableCell>
                             <Link
-                              to={`/resources/${encodeURIComponent(r.metadata.name)}`}
+                              to={`/tlscertificates/${encodeURIComponent(r.metadata.name)}`}
                               className="text-primary hover:underline"
                             >
                               {r.metadata.name}

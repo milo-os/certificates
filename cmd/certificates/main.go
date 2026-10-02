@@ -5,7 +5,7 @@ package main
 import (
 	"os"
 
-	"go.miloapis.com/controller-template/cmd/controller-template/cmd"
+	"go.miloapis.com/certificates/cmd/certificates/cmd"
 )
 
 // Build metadata set via -ldflags at build time. See Dockerfile.

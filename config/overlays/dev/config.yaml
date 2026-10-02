@@ -1,5 +1,5 @@
 apiVersion: apiserver.config.miloapis.com/v1alpha1
-kind: ControllerTemplateOperator
+kind: TLSCertificateOperator
 metricsServer:
   bindAddress: "0"
 # Uncomment and set kubeconfigPath to point at Milo's control plane API server

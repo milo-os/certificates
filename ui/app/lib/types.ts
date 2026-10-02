@@ -16,7 +16,7 @@ export interface KubeCondition {
   lastTransitionTime?: string;
 }
 
-export interface Resource {
+export interface TLSCertificate {
   metadata: KubeMeta;
   spec: {
     description?: string;

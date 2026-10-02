@@ -1,4 +1,4 @@
-# controller-template
+# certificates
 
 A production-ready starting point for building Kubernetes controller services on the Milo platform. Fork this once and you get a working kubebuilder v4 controller, example CRD with reconciler/finalizer/conditions, defaulting and validating webhooks, a full Kustomize deployment tree, a Remix UI, Taskfile-based dev workflow, GitHub Actions CI, and a Claude Code integration that guides you through naming and initialization before you write a single line of code.
 
@@ -77,20 +77,20 @@ The script replaces all template placeholders throughout the codebase:
 
 | Placeholder | Replaced with |
 |-------------|---------------|
-| `controller-template` | `--service-name` (e.g. `billing`) |
-| `example.miloapis.com` | `--api-group` (e.g. `billing.miloapis.com`) |
-| `Resource` | `--kind` (e.g. `BillingAccount`) |
-| `resource` | lowercase kind (e.g. `billingaccount`) |
-| `ControllerTemplateOperator` | `<Kind>Operator` |
-| `CONTROLLER_TEMPLATE_API_` | `<SERVICE>_API_` env prefix |
-| `go.miloapis.com/controller-template` | `go.miloapis.com/<service-name>` |
+| `certificates` | `--service-name` (e.g. `billing`) |
+| `certificates.miloapis.com` | `--api-group` (e.g. `billing.miloapis.com`) |
+| `TLSCertificate` | `--kind` (e.g. `BillingAccount`) |
+| `tlscertificate` | lowercase kind (e.g. `billingaccount`) |
+| `TLSCertificateOperator` | `<Kind>Operator` |
+| `CERTIFICATES_API_` | `<SERVICE>_API_` env prefix |
+| `go.miloapis.com/certificates` | `go.miloapis.com/<service-name>` |
 
 File and directory names containing these strings are renamed as well.
 
 After renaming, verify no placeholders remain:
 
 ```bash
-grep -r "controller-template\|example\.miloapis\.com" \
+grep -r "certificates\|example\.miloapis\.com" \
   --include="*.go" --include="*.yaml" --include="*.ts" --include="*.tsx" .
 ```
 
@@ -152,8 +152,8 @@ task e2e
 ## Project structure
 
 ```
-controller-template/
-├── cmd/controller-template/    # Binary entrypoint
+certificates/
+├── cmd/certificates/    # Binary entrypoint
 ├── api/v1alpha1/               # CRD type definitions (*_types.go)
 ├── internal/
 │   ├── config/                 # Operator config type (kubeconfigPath, etc.)
@@ -197,7 +197,7 @@ The operator config supports a `kubeconfigPath` field that points the controller
 
 ```yaml
 apiVersion: apiserver.config.miloapis.com/v1alpha1
-kind: ControllerTemplateOperator
+kind: TLSCertificateOperator
 metricsServer:
   bindAddress: "0"
 kubeconfigPath: /etc/milo/kubeconfig

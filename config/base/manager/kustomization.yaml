@@ -8,12 +8,12 @@ resources:
 - pdb.yaml
 
 images:
-- name: ghcr.io/milo-os/controller-template
+- name: ghcr.io/milo-os/certificates
   newTag: latest
 
 configMapGenerator:
 - files:
   - config.yaml
-  name: controller-template-config
+  name: certificates-config
   options:
     disableNameSuffixHash: true

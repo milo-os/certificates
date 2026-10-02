@@ -2,12 +2,12 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: controller-template-manager
+  name: certificates-manager
 rules:
 - apiGroups:
-  - example.miloapis.com
+  - certificates.miloapis.com
   resources:
-  - resources
+  - tlscertificates
   verbs:
   - create
   - delete
@@ -17,15 +17,15 @@ rules:
   - update
   - watch
 - apiGroups:
-  - example.miloapis.com
+  - certificates.miloapis.com
   resources:
-  - resources/finalizers
+  - tlscertificates/finalizers
   verbs:
   - update
 - apiGroups:
-  - example.miloapis.com
+  - certificates.miloapis.com
   resources:
-  - resources/status
+  - tlscertificates/status
   verbs:
   - get
   - patch

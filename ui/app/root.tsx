@@ -18,7 +18,7 @@ export const links: LinksFunction = () => [
 export const meta: MetaFunction = () => {
   return [
     { title: "Controller Template" },
-    { name: "description", content: "Manage resources on the Milo control plane." },
+    { name: "description", content: "Manage tlscertificates on the Milo control plane." },
   ];
 };
 

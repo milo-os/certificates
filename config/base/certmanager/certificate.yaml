@@ -2,7 +2,7 @@ apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
   labels:
-    app.kubernetes.io/name: controller-template
+    app.kubernetes.io/name: certificates
     app.kubernetes.io/managed-by: kustomize
   name: selfsigned-issuer
 spec:
@@ -12,9 +12,9 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   labels:
-    app.kubernetes.io/name: controller-template
+    app.kubernetes.io/name: certificates
     app.kubernetes.io/managed-by: kustomize
-  name: controller-template-serving-cert
+  name: certificates-serving-cert
 spec:
   # The Service name and namespace get substituted in by kustomize
   # replacements in the consuming overlay.
@@ -24,4 +24,4 @@ spec:
   issuerRef:
     kind: Issuer
     name: selfsigned-issuer
-  secretName: controller-template-webhook-cert
+  secretName: certificates-webhook-cert

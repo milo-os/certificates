@@ -37,8 +37,8 @@ function buildCrumbs(pathname: string): Crumb[] {
   const segments = pathname.split("/").filter(Boolean);
   const crumbs: Crumb[] = [{ label: "Home", to: "/" }];
 
-  if (segments[0] === "resources") {
-    crumbs.push({ label: "Resources", to: "/resources" });
+  if (segments[0] === "tlscertificates") {
+    crumbs.push({ label: "TLSCertificates", to: "/tlscertificates" });
     if (segments[1]) {
       const name = decodeURIComponent(segments[1]);
       crumbs.push({ label: name });
@@ -56,9 +56,9 @@ export function AppLayout({ children }: AppLayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   const pathSegments = location.pathname.split("/").filter(Boolean);
-  const inResourceContext =
-    pathSegments[0] === "resources" && pathSegments.length >= 2;
-  const resourceName = inResourceContext ? pathSegments[1] : null;
+  const inTLSCertificateContext =
+    pathSegments[0] === "tlscertificates" && pathSegments.length >= 2;
+  const tlscertificateName = inTLSCertificateContext ? pathSegments[1] : null;
 
   return (
     <SidebarProvider open={sidebarOpen} onOpenChange={setSidebarOpen}>
@@ -66,16 +66,16 @@ export function AppLayout({ children }: AppLayoutProps) {
         <SidebarHeader className="px-4 py-3 font-semibold text-sm">
           Controller Template
         </SidebarHeader>
-        {inResourceContext ? (
+        {inTLSCertificateContext ? (
           <SidebarContent>
             <SidebarGroup>
               <SidebarGroupContent>
                 <SidebarMenu>
                   <SidebarMenuItem>
                     <SidebarMenuButton asChild>
-                      <Link to="/resources">
+                      <Link to="/tlscertificates">
                         <ArrowLeftIcon className="size-4" />
-                        Resources
+                        TLSCertificates
                       </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
@@ -84,13 +84,13 @@ export function AppLayout({ children }: AppLayoutProps) {
             </SidebarGroup>
             <SidebarGroup>
               <SidebarGroupLabel className="truncate">
-                {decodeURIComponent(resourceName ?? "")}
+                {decodeURIComponent(tlscertificateName ?? "")}
               </SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu>
                   <SidebarMenuItem>
                     <SidebarMenuButton asChild isActive>
-                      <Link to={`/resources/${resourceName}`}>
+                      <Link to={`/tlscertificates/${tlscertificateName}`}>
                         <LayoutDashboardIcon className="size-4" />
                         Overview
                       </Link>
@@ -109,11 +109,11 @@ export function AppLayout({ children }: AppLayoutProps) {
                   <SidebarMenuItem>
                     <SidebarMenuButton
                       asChild
-                      isActive={location.pathname.startsWith("/resources")}
+                      isActive={location.pathname.startsWith("/tlscertificates")}
                     >
-                      <Link to="/resources">
+                      <Link to="/tlscertificates">
                         <BoxIcon className="size-4" />
-                        Resources
+                        TLSCertificates
                       </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>

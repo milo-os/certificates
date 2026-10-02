@@ -4,7 +4,7 @@ If `.claude/.initialized` does not exist in this repository, **invoke the `/init
 
 ---
 
-# controller-template
+# certificates
 
 A template repository for building Kubernetes controllers that connect to the Milo control plane. Based on kubebuilder v4, modeled after the `billing` service conventions.
 
@@ -17,15 +17,15 @@ A template repository for building Kubernetes controllers that connect to the Mi
 
 ## API Group
 
-- Group: `example.miloapis.com`
+- Group: `certificates.miloapis.com`
 - Version: `v1alpha1`
-- Resources: `Resource` (rename when forking this template)
+- Resources: `TLSCertificate` (rename when forking this template)
 
 ## Repo Layout
 
 ```
-controller-template/
-├── cmd/controller-template/main.go  # Binary entrypoint
+certificates/
+├── cmd/certificates/main.go  # Binary entrypoint
 ├── api/v1alpha1/                     # CRD type definitions
 ├── internal/
 │   ├── config/                       # Operator configuration
@@ -50,10 +50,10 @@ controller-template/
 
 When forking this template for a new service:
 
-1. Replace `controller-template` → `your-service-name` throughout
-2. Replace `example.miloapis.com` → `your-group.miloapis.com`
-3. Replace `Resource` / `resource` → your CRD kind
-4. Replace `ControllerTemplateOperator` → `YourServiceOperator` in `internal/config/config.go`
+1. Replace `certificates` → `your-service-name` throughout
+2. Replace `certificates.miloapis.com` → `your-group.miloapis.com`
+3. Replace `TLSCertificate` / `tlscertificate` → your CRD kind
+4. Replace `TLSCertificateOperator` → `YourServiceOperator` in `internal/config/config.go`
 5. Update `go.mod` module path: `go.miloapis.com/your-service-name`
 6. Run `task generate && task manifests` to regenerate code and manifests
 7. Update `config/base/manager/config.yaml` and `config/overlays/dev/config.yaml`
@@ -64,7 +64,7 @@ The operator config supports a `kubeconfigPath` field that points at Milo's API 
 
 ```yaml
 apiVersion: apiserver.config.miloapis.com/v1alpha1
-kind: ControllerTemplateOperator
+kind: TLSCertificateOperator
 metricsServer:
   bindAddress: "0"
 kubeconfigPath: /etc/milo/kubeconfig

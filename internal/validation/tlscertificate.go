@@ -139,6 +139,6 @@ func validateHostname(base string) []string {
 }
 
 func isICANNTopLevelDomain(tld string) bool {
-	suffix, icann := publicsuffix.PublicSuffix(tld)
-	return icann && suffix == tld
+	_, icann := publicsuffix.PublicSuffix("x." + tld)
+	return icann
 }

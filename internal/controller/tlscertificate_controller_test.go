@@ -248,9 +248,10 @@ var _ = Describe("TLSCertificate reconciler", func() {
 
 		By("reporting an in-flight order without an error while a challenge makes routine progress")
 		cert.Status.Conditions = []cmv1.CertificateCondition{{
-			Type:   cmv1.CertificateConditionIssuing,
-			Status: cmmeta.ConditionTrue,
-			Reason: "Issuing",
+			Type:    cmv1.CertificateConditionIssuing,
+			Status:  cmmeta.ConditionTrue,
+			Reason:  "Issuing",
+			Message: "Issuing certificate as Secret does not exist",
 		}}
 		Expect(k8sClient.Status().Update(ctx, &cert)).To(Succeed())
 		challenge.Status.State = acmev1.Pending
@@ -275,6 +276,17 @@ var _ = Describe("TLSCertificate reconciler", func() {
 			WithTransform(func(tc *certificatesv1alpha1.TLSCertificate) string {
 				return condition(tc, certificatesv1alpha1.ConditionIssuing).Message
 			}, Equal("connection refused")),
+			HaveField("Status.Challenges", ConsistOf(HaveField("State", certificatesv1alpha1.ChallengeStateInvalid))),
+		))
+
+		By("reporting the reason of an expired challenge")
+		challenge.Status.State = acmev1.Expired
+		challenge.Status.Reason = "challenge expired"
+		Expect(k8sClient.Status().Update(ctx, challenge)).To(Succeed())
+		Eventually(get(tc)).Should(And(
+			WithTransform(func(tc *certificatesv1alpha1.TLSCertificate) string {
+				return condition(tc, certificatesv1alpha1.ConditionIssuing).Message
+			}, Equal("challenge expired")),
 			HaveField("Status.Challenges", ConsistOf(HaveField("State", certificatesv1alpha1.ChallengeStateInvalid))),
 		))
 

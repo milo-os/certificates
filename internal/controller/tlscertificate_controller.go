@@ -598,7 +598,7 @@ func (r *TLSCertificateReconciler) syncProjectSecret(
 			WithUID(tc.UID).
 			WithController(true).
 			WithBlockOwnerDeletion(true))
-	if err := cl.GetClient().Apply(ctx, secret, client.FieldOwner(fieldManager)); err != nil {
+	if err := cl.GetClient().Apply(ctx, secret, client.FieldOwner(fieldManager+"/"+string(tc.UID))); err != nil {
 		if apierrors.IsInvalid(err) || apierrors.IsConflict(err) {
 			r.setCondition(tc, certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "SecretConflict",
 				fmt.Sprintf("Secret %q exists and is not managed by this TLSCertificate.", secretName))

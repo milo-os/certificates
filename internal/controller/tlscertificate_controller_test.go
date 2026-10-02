@@ -572,6 +572,35 @@ var _ = Describe("TLSCertificate reconciler", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "db-credentials"}, &secret)).To(Succeed())
 	})
 
+	It("refuses to take over a project Secret another TLSCertificate owns", func() {
+		first := newTLSCertificate(ns, "first", certificatesv1alpha1.IssuanceModeAuto, "first.example.com")
+		first.Spec.SecretName = "shared-cert"
+		Expect(k8sClient.Create(ctx, first)).To(Succeed())
+		firstCert := certNameFor(projectA, first)
+		Eventually(serviceCertificateExists(firstCert)).Should(BeTrue())
+		issueSecret(firstCert, first.UID, "first.example.com")
+		Eventually(get(first)).Should(hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionTrue, "Issued"))
+
+		var original corev1.Secret
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "shared-cert"}, &original)).To(Succeed())
+
+		second := newTLSCertificate(ns, "second", certificatesv1alpha1.IssuanceModeAuto, "second.example.com")
+		second.Spec.SecretName = "shared-cert"
+		Expect(k8sClient.Create(ctx, second)).To(Succeed())
+		secondCert := certNameFor(projectA, second)
+		Eventually(serviceCertificateExists(secondCert)).Should(BeTrue())
+		issueSecret(secondCert, second.UID, "second.example.com")
+
+		Eventually(get(second)).Should(hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "SecretConflict"))
+		Consistently(get(first), time.Second).Should(hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionTrue, "Issued"))
+		var secret corev1.Secret
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "shared-cert"}, &secret)).To(Succeed())
+		Expect(secret.Data).To(Equal(original.Data))
+		Expect(secret.Labels).To(HaveKeyWithValue(UpstreamUIDLabel, string(first.UID)))
+		Expect(secret.OwnerReferences).To(HaveLen(1))
+		Expect(secret.OwnerReferences[0].UID).To(Equal(first.UID))
+	})
+
 	It("keeps the same namespace and name in two projects apart", func() {
 		nsB := newProjectNamespace(k8sClientB)
 		Expect(k8sClientB.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())

@@ -13,3 +13,20 @@ subjects:
 - kind: ServiceAccount
   name: certificates-manager
   namespace: certificates-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: certificates
+    app.kubernetes.io/managed-by: kustomize
+  name: certificates-manager
+  namespace: certificates-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: certificates-manager
+subjects:
+- kind: ServiceAccount
+  name: certificates-manager
+  namespace: certificates-system

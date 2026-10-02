@@ -16,6 +16,7 @@ func TestDefaultFlagsRequireServiceIdentitiesWithWebhook(t *testing.T) {
 	deleters, _ := cmd.Flags().GetStringSlice("allowed-deleter-identities")
 	denied, _ := cmd.Flags().GetStringSlice("denied-domain-suffixes")
 	f := issuanceFlags{
+		certificateNamespace: "certificates-system",
 		writerIdentities:     writers,
 		serviceIdentities:    services,
 		deleterIdentities:    deleters,

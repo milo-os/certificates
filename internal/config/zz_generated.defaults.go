@@ -25,4 +25,5 @@ func SetObjectDefaults_TLSCertificateOperator(in *TLSCertificateOperator) {
 		SetDefaults_WebhookServerConfig(in.WebhookServer)
 		SetDefaults_TLSConfig(&in.WebhookServer.TLS)
 	}
+	SetDefaults_DiscoveryConfig(&in.Discovery)
 }

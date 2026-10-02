@@ -427,7 +427,7 @@ func (r *TLSCertificateReconciler) observeChallenges(ctx context.Context, tc *ce
 }
 
 func failureReason(state acmev1.State, reason string) string {
-	if state == acmev1.Invalid || state == acmev1.Errored {
+	if state == acmev1.Invalid || state == acmev1.Errored || state == acmev1.Expired {
 		return reason
 	}
 	return ""
@@ -448,17 +448,14 @@ func (r *TLSCertificateReconciler) observeCertificate(tc *certificatesv1alpha1.T
 	tc.Status.RenewalTime = cert.Status.RenewalTime
 
 	issuing := certManagerCondition(cert, cmv1.CertificateConditionIssuing)
-	msg := ""
-	if issuing != nil {
-		msg = truncate(issuing.Message)
-	}
-	if acmeErr != "" {
-		msg = acmeErr
-	}
+	msg := acmeErr
 	switch {
 	case issuing != nil && issuing.Status == cmmeta.ConditionTrue:
 		r.setCondition(tc, certificatesv1alpha1.ConditionIssuing, metav1.ConditionTrue, "OrderInFlight", msg)
 	case issuing != nil && issuing.Reason == "Failed":
+		if msg == "" {
+			msg = truncate(issuing.Message)
+		}
 		r.setCondition(tc, certificatesv1alpha1.ConditionIssuing, metav1.ConditionFalse, "IssuanceFailed", msg)
 	default:
 		r.setCondition(tc, certificatesv1alpha1.ConditionIssuing, metav1.ConditionFalse, "NoOrderInFlight", "No ACME order is in flight.")

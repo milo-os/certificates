@@ -4,7 +4,10 @@ package controller
 
 import (
 	"context"
+	"net"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,6 +40,8 @@ import (
 const (
 	serviceNamespace = "certificates-system"
 	http01Issuer     = "letsencrypt-http01"
+	dns01Issuer      = "letsencrypt-dns01"
+	delegationZone   = "acme-dns.example.net"
 	projectA         = "project-a"
 	projectB         = "project-b"
 )
@@ -50,8 +55,48 @@ var (
 	ctx        context.Context
 	cancel     context.CancelFunc
 	scheme     = runtime.NewScheme()
+	resolver   = &fakeResolver{records: map[string]string{}, transient: map[string]bool{}}
 	mcMgr      mcmanager.Manager
 )
+
+type fakeResolver struct {
+	mu        sync.Mutex
+	records   map[string]string
+	transient map[string]bool
+}
+
+func (f *fakeResolver) LookupCNAME(_ context.Context, host string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	host = strings.TrimSuffix(host, ".")
+	if f.transient[host] {
+		return "", &net.DNSError{Err: "i/o timeout", Name: host, IsTimeout: true}
+	}
+	if target, ok := f.records[host]; ok {
+		return target + ".", nil
+	}
+	return "", &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+}
+
+func (f *fakeResolver) set(host, target string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.records[host] = target
+	delete(f.transient, host)
+}
+
+func (f *fakeResolver) remove(host string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.records, host)
+	delete(f.transient, host)
+}
+
+func (f *fakeResolver) fail(host string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.transient[host] = true
+}
 
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -118,10 +163,17 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 
 	Expect((&TLSCertificateReconciler{
-		CertificateNamespace:    serviceNamespace,
-		HTTP01ClusterIssuer:     http01Issuer,
-		DeniedDomainSuffixes:    []string{"datumproxy.net"},
-		MaxConcurrentReconciles: 2,
+		CertificateNamespace:      serviceNamespace,
+		HTTP01ClusterIssuer:       http01Issuer,
+		DNS01ClusterIssuer:        dns01Issuer,
+		DNS01DelegationZone:       delegationZone,
+		DeniedDomainSuffixes:      []string{"datumproxy.net"},
+		MaxConcurrentReconciles:   2,
+		Resolver:                  resolver,
+		DelegationRecheckInterval: 200 * time.Millisecond,
+		DelegatedRecheckInterval:  200 * time.Millisecond,
+		SuspendAfterFailures:      3,
+		SuspendAfter:              2 * time.Second,
 	}).SetupWithManager(mcMgr)).To(Succeed())
 
 	go func() {

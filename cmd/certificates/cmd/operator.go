@@ -289,7 +289,7 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 	cmd.Flags().StringVar(&issuance.dns01ClusterIssuer, "dns01-cluster-issuer", "",
 		"cert-manager ClusterIssuer used for DNS01 issuance. It must follow CNAMEs into --dns01-delegation-zone. DNS01 TLSCertificates are not accepted when empty.")
 	cmd.Flags().StringVar(&issuance.dns01DelegationZone, "dns01-delegation-zone", "",
-		"DNS zone the DNS01 issuer writes challenge records into. Each name's _acme-challenge record must be a CNAME to the random target in the TLSCertificate's status.delegationTarget, under this zone.")
+		"DNS zone the DNS01 issuer writes challenge records into. Each name's _acme-challenge record must be a CNAME to the random target listed in the TLSCertificate's status.requiredDNSRecords, under this zone.")
 	cmd.Flags().StringSliceVar(&issuance.deniedDomainSuffixes, "denied-domain-suffixes", []string{"datumproxy.net", "datum.net", "datum-staging.net", "datumdomains.net", "miloapis.com", "datumapis.com"},
 		"Domains the service never issues for, including every name beneath them. The DNS01 delegation zone is always denied.")
 	cmd.Flags().StringSliceVar(&issuance.writerIdentities, "allowed-writer-identities", []string{"system:control@networking.datumapis.com"},

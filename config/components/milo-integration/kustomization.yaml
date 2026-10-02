@@ -6,8 +6,14 @@ patches:
       kind: Deployment
       name: certificates-manager
     patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/volumeMounts/1/name
+        value: webhook-cert
       - op: remove
         path: /spec/template/spec/containers/0/volumeMounts/1
+      - op: test
+        path: /spec/template/spec/volumes/1/name
+        value: webhook-cert
       - op: remove
         path: /spec/template/spec/volumes/1
   - target:

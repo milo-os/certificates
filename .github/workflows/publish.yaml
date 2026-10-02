@@ -28,7 +28,7 @@ jobs:
       image-name: certificates-ui
       registry-organization: milo-os
       platforms: linux/amd64,linux/arm64
-      dockerfile: ui/Dockerfile
+      dockerfile-path: ui/Dockerfile
       context: ui
     secrets: inherit
 

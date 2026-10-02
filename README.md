@@ -1,47 +1,8 @@
 # certificates
 
-A production-ready starting point for building Kubernetes controller services on the Milo platform. Fork this once and you get a working kubebuilder v4 controller, example CRD with reconciler/finalizer/conditions, defaulting and validating webhooks, a full Kustomize deployment tree, a Remix UI, Taskfile-based dev workflow, GitHub Actions CI, and a Claude Code integration that guides you through naming and initialization before you write a single line of code.
-
-This template exists because building all of that from scratch — correctly — takes days. Forking this takes minutes.
-
----
-
-## Using with Claude Code
-
-This template is designed for AI-assisted development. Claude Code has first-class support baked in: a session hook, a `/init-service` command, and a `CLAUDE.md` that gives Claude full context about the codebase conventions.
-
-### First open: automatic product discovery
-
-When you open this repo in Claude Code for the first time (before initialization), a session hook fires automatically. Claude starts a product discovery conversation:
-
-1. It silently researches the existing `milo-os` services on GitHub to understand what already exists, which API groups are taken, and which naming patterns are used across the org.
-2. It asks what you're trying to build — starting with the problem, not the name.
-3. It proposes a service name, API group, and primary resource kind based on your description and the existing ecosystem. It will flag if something similar already exists.
-4. Once you confirm the design, it runs `hack/rename.sh` with the agreed values and creates the `.claude/.initialized` marker.
-
-You never touch the rename script manually. Claude runs it for you after you've agreed on the design.
-
-### After initialization
-
-Once initialized, Claude Code has full context via `CLAUDE.md` to help you develop the service iteratively:
-
-- Adding new resource types (`kubebuilder create api`)
-- Writing reconciler logic
-- Adding validation rules to webhooks
-- Extending the Remix UI with new routes and components
-- Generating and applying manifests
-
-This is not a one-time scaffold. It's a development partner for the full lifecycle of the service.
-
-### Manual trigger
-
-If you want to restart the discovery flow, run:
-
-```
-/init-service
-```
-
----
+Certificates, built in. The certificate service issues publicly trusted TLS
+certificates for hostnames in Milo project control planes and delivers them as
+`kubernetes.io/tls` Secrets beside the request.
 
 ## Prerequisites
 
@@ -56,52 +17,6 @@ If you want to restart the discovery flow, run:
 | gh | any | https://cli.github.com |
 
 kubebuilder is listed as a reference tool — you need it to add new API types after initialization, but not for the initial setup.
-
----
-
-## Getting started manually
-
-If you're not using Claude Code, run the rename script yourself after forking:
-
-```bash
-chmod +x hack/rename.sh
-./hack/rename.sh \
-  --service-name billing \
-  --api-group billing.miloapis.com \
-  --kind BillingAccount
-```
-
-Use `--dry-run` to preview changes without writing anything.
-
-The script replaces all template placeholders throughout the codebase:
-
-| Placeholder | Replaced with |
-|-------------|---------------|
-| `certificates` | `--service-name` (e.g. `billing`) |
-| `certificates.miloapis.com` | `--api-group` (e.g. `billing.miloapis.com`) |
-| `TLSCertificate` | `--kind` (e.g. `BillingAccount`) |
-| `tlscertificate` | lowercase kind (e.g. `billingaccount`) |
-| `TLSCertificateOperator` | `<Kind>Operator` |
-| `CERTIFICATES_API_` | `<SERVICE>_API_` env prefix |
-| `go.miloapis.com/certificates` | `go.miloapis.com/<service-name>` |
-
-File and directory names containing these strings are renamed as well.
-
-After renaming, verify no placeholders remain:
-
-```bash
-grep -r "certificates\|example\.miloapis\.com" \
-  --include="*.go" --include="*.yaml" --include="*.ts" --include="*.tsx" .
-```
-
-An empty result means all placeholders were replaced. Hits in `zz_generated.*` files are expected and will be overwritten in the next step.
-
-Then regenerate and verify the build:
-
-```bash
-task generate && task manifests
-task build && task test
-```
 
 ---
 
@@ -168,7 +83,6 @@ certificates/
 │   └── app/lib/                # k8s server client, kubeconfig, types
 ├── test/e2e/                   # Chainsaw test cases
 └── hack/
-    └── rename.sh               # One-shot placeholder replacement script
 ```
 
 ---
@@ -188,22 +102,6 @@ certificates/
 | `task ui:build` | Production build of the UI |
 | `task ui:type-check` | TypeScript type check |
 | `task e2e` | Run Chainsaw e2e tests |
-
----
-
-## Connecting to the Milo control plane
-
-The operator config supports a `kubeconfigPath` field that points the controller at Milo's API server instead of its local cluster:
-
-```yaml
-apiVersion: apiserver.config.miloapis.com/v1alpha1
-kind: TLSCertificateOperator
-metricsServer:
-  bindAddress: "0"
-kubeconfigPath: /etc/milo/kubeconfig
-```
-
-When `kubeconfigPath` is empty, the controller falls back to in-cluster config — the default for local kind development.
 
 ---
 

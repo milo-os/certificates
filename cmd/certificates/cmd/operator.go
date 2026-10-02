@@ -154,4 +154,3 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 
 	return cmd
 }
-

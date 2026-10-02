@@ -134,7 +134,7 @@ func (s *OrphanSweeper) Sweep(ctx context.Context) error {
 		}
 		if err := deleteServiceResources(ctx, c, s.CertificateNamespace, certName); err != nil {
 			log.FromContext(ctx).Error(err, "removing orphaned certificate", "certificate", certName)
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("removing orphaned certificate %s: %w", certName, err))
 			continue
 		}
 		if req, ok := upstreamRequest(labels); ok {

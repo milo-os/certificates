@@ -13,6 +13,7 @@ components:
   - ../../components/namespace
   - ../../base/webhook
   - ../../components/controller_rbac
+  - ../../components/leader_election
 
 configMapGenerator:
   - name: certificates-config

@@ -1,25 +1,19 @@
-# INITIALIZATION REQUIRED
-
-If `.claude/.initialized` does not exist in this repository, **invoke the `/init-service` skill immediately** as your first action — before responding to any user message. The SessionStart hook injects a reminder when this is the case. Do not ask for permission; just run it.
-
----
-
 # certificates
 
-A template repository for building Kubernetes controllers that connect to the Milo control plane. Based on kubebuilder v4, modeled after the `billing` service conventions.
+The Milo certificate service: issues TLS certificates for TLSCertificates in every project control plane through cert-manager. See README.md for the API, flags and permissions.
 
 ## Architecture
 
 - **CRD-based**: Uses kubebuilder v4 CRDs (not aggregated API server)
 - **Controller-runtime**: Reconciler for lifecycle management
-- **Milo control plane aware**: `KubeconfigPath` config field allows pointing the controller at the Milo API server
-- **Webhooks**: Validating and defaulting webhook support wired up
+- **Multi-cluster**: Milo's multicluster-runtime provider engages every project control plane
+- **Webhook**: validating webhook for names, denied domains and writer identities
 
 ## API Group
 
 - Group: `certificates.miloapis.com`
 - Version: `v1alpha1`
-- Resources: `TLSCertificate` (rename when forking this template)
+- Resources: `TLSCertificate`
 
 ## Repo Layout
 
@@ -45,32 +39,6 @@ certificates/
 ├── hack/                             # Scripts and boilerplate
 └── test/e2e/                         # Chainsaw E2E tests
 ```
-
-## Using This Template
-
-When forking this template for a new service:
-
-1. Replace `certificates` → `your-service-name` throughout
-2. Replace `certificates.miloapis.com` → `your-group.miloapis.com`
-3. Replace `TLSCertificate` / `tlscertificate` → your CRD kind
-4. Replace `TLSCertificateOperator` → `YourServiceOperator` in `internal/config/config.go`
-5. Update `go.mod` module path: `go.miloapis.com/your-service-name`
-6. Run `task generate && task manifests` to regenerate code and manifests
-7. Update `config/base/manager/config.yaml` and `config/overlays/dev/config.yaml`
-
-## Connecting to the Milo Control Plane
-
-The operator config supports a `kubeconfigPath` field that points at Milo's API server:
-
-```yaml
-apiVersion: apiserver.config.miloapis.com/v1alpha1
-kind: TLSCertificateOperator
-metricsServer:
-  bindAddress: "0"
-kubeconfigPath: /etc/milo/kubeconfig
-```
-
-When `kubeconfigPath` is empty, the controller falls back to in-cluster config, which is the default for development against a local kind cluster.
 
 ## Verification Commands
 

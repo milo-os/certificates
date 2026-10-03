@@ -20,7 +20,7 @@ import (
 
 const (
 	tlscertificateFinalizer = "certificates.miloapis.com/tlscertificate"
-	ConditionTypeReady = "Ready"
+	ConditionTypeReady      = "Ready"
 )
 
 // TLSCertificateReconciler reconciles a TLSCertificate object.

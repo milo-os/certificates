@@ -27,3 +27,5 @@ cover.out
 
 # Claude AI
 .claude/.initialized
+
+.claude/worktrees/

@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"regexp"
 	"time"
 
 	acmev1 "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
@@ -21,6 +22,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
 
@@ -287,6 +289,145 @@ var _ = Describe("TLSCertificate reconciler", func() {
 			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: certName}, obj))).To(BeTrue())
 		}
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: issuingSecretName(certName)}, &corev1.Secret{}))).To(BeTrue())
+	})
+
+	It("gates DNS01 issuance on a project-bound delegation target and suspends renewal when delegation is lost", func() {
+		tc := newTLSCertificate(ns, "wild", certificatesv1alpha1.IssuanceModeAuto, "*.wild.example.com", "wild.example.com")
+		Expect(k8sClient.Create(ctx, tc)).To(Succeed())
+		certName := certNameFor(projectA, tc)
+		targetPattern := regexp.MustCompile(`^[0-9a-f]{32}\.` + regexp.QuoteMeta(delegationZone) + `$`)
+
+		By("publishing a random delegation target and waiting for the CNAME")
+		Eventually(get(tc)).Should(And(
+			HaveField("Status.Issuance", certificatesv1alpha1.ChallengeTypeDNS01),
+			HaveField("Status.DelegationTarget", MatchRegexp(targetPattern.String())),
+			hasCondition(certificatesv1alpha1.ConditionDNSDelegationReady, metav1.ConditionFalse, "CNAMENotFound"),
+			hasCondition(certificatesv1alpha1.ConditionIssuing, metav1.ConditionFalse, "WaitingForDNSDelegation"),
+		))
+		target := get(tc)(Default).Status.DelegationTarget
+		Expect(get(tc)(Default).Status.RequiredDNSRecords).To(ConsistOf(certificatesv1alpha1.RequiredDNSRecord{
+			Name:    "_acme-challenge.wild.example.com",
+			Type:    "CNAME",
+			Content: target,
+			Purpose: certificatesv1alpha1.DNSRecordPurposeCertificate,
+		}))
+		Consistently(serviceCertificateExists(certName), time.Second).Should(BeFalse())
+
+		By("ignoring a delegation target written into status")
+		resolver.set("_acme-challenge.wild.example.com", "attacker."+delegationZone)
+		Eventually(func() error {
+			tampered := get(tc)(Default)
+			tampered.Status.DelegationTarget = "attacker." + delegationZone
+			return k8sClient.Status().Update(ctx, tampered)
+		}).Should(Succeed())
+		Eventually(get(tc)).Should(HaveField("Status.DelegationTarget", target))
+		Consistently(serviceCertificateExists(certName), time.Second).Should(BeFalse())
+
+		By("creating the Certificate once the CNAME resolves to the target")
+		resolver.set("_acme-challenge.wild.example.com", target)
+		Eventually(get(tc)).Should(hasCondition(certificatesv1alpha1.ConditionDNSDelegationReady, metav1.ConditionTrue, "CNAMEResolved"))
+		Eventually(serviceCertificateExists(certName)).Should(BeTrue())
+		var cert cmv1.Certificate
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: certName}, &cert)).To(Succeed())
+		Expect(cert.Spec.IssuerRef.Name).To(Equal(dns01Issuer))
+		Expect(cert.Spec.DNSNames).To(Equal([]string{"*.wild.example.com", "wild.example.com"}))
+
+		issueSecret(certName, tc.UID, "*.wild.example.com", "wild.example.com")
+		Eventually(get(tc)).Should(hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionTrue, "Issued"))
+
+		By("keeping the Certificate through transient lookup failures")
+		resolver.fail("_acme-challenge.wild.example.com")
+		Eventually(get(tc)).Should(hasCondition(certificatesv1alpha1.ConditionDNSDelegationReady, metav1.ConditionUnknown, "LookupFailed"))
+		Consistently(serviceCertificateExists(certName), 3*time.Second).Should(BeTrue())
+
+		By("suspending renewal only after repeated definitive failures, keeping the service's copy")
+		resolver.remove("_acme-challenge.wild.example.com")
+		Eventually(get(tc)).Should(hasCondition(certificatesv1alpha1.ConditionDNSDelegationReady, metav1.ConditionFalse, "CNAMENotFound"))
+		Expect(serviceCertificateExists(certName)()).To(BeTrue(), "one definitive failure must not suspend")
+		Eventually(serviceCertificateExists(certName)).Should(BeFalse())
+
+		By("surviving cert-manager or garbage collection removing its own Secret")
+		Expect(k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: issuingSecretName(certName)}})).To(Succeed())
+		Eventually(get(tc)).Should(And(
+			hasCondition(certificatesv1alpha1.ConditionIssuing, metav1.ConditionFalse, "WaitingForDNSDelegation"),
+			hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionTrue, "Issued"),
+			HaveField("Status.ServiceSecretRef", Equal(&certificatesv1alpha1.ServiceSecretReference{Namespace: serviceNamespace, Name: certName})),
+		))
+		Consistently(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: certName}, &corev1.Secret{})
+		}, time.Second).Should(Succeed())
+		Consistently(serviceCertificateExists(certName), time.Second).Should(BeFalse())
+
+		By("resuming once the CNAME is restored")
+		resolver.set("_acme-challenge.wild.example.com", target)
+		Eventually(serviceCertificateExists(certName)).Should(BeTrue())
+
+		By("keeping the delegation target when the TLSCertificate is recreated in the same namespace")
+		Expect(k8sClient.Delete(ctx, tc)).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: certName}, &corev1.ConfigMap{}))
+		}).Should(BeTrue())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(tc), &certificatesv1alpha1.TLSCertificate{}))
+		}).Should(BeTrue())
+
+		recreated := newTLSCertificate(ns, "wild", certificatesv1alpha1.IssuanceModeAuto, "*.wild.example.com", "wild.example.com")
+		Expect(k8sClient.Create(ctx, recreated)).To(Succeed())
+		Eventually(get(recreated)).Should(And(
+			HaveField("Status.DelegationTarget", target),
+			hasCondition(certificatesv1alpha1.ConditionDNSDelegationReady, metav1.ConditionTrue, "CNAMEResolved"),
+		))
+		Eventually(serviceCertificateExists(certNameFor(projectA, recreated))).Should(BeTrue())
+
+		By("assigning a different target to the same name in another namespace")
+		other := newTLSCertificate(newProjectNamespace(k8sClient), "wild", certificatesv1alpha1.IssuanceModeAuto, "*.wild.example.com")
+		Expect(k8sClient.Create(ctx, other)).To(Succeed())
+		Eventually(get(other)).Should(HaveField("Status.DelegationTarget", And(MatchRegexp(targetPattern.String()), Not(Equal(target)))))
+		Consistently(serviceCertificateExists(certNameFor(projectA, other)), time.Second).Should(BeFalse())
+	})
+
+	It("lists a target per name and sets delegationTarget only for a single base name", func() {
+		tc := newTLSCertificate(ns, "multi", certificatesv1alpha1.IssuanceModeDNS01, "*.a.example.com", "b.example.com")
+		Expect(k8sClient.Create(ctx, tc)).To(Succeed())
+		Eventually(get(tc)).Should(HaveField("Status.RequiredDNSRecords", HaveLen(2)))
+		got := get(tc)(Default)
+		Expect(got.Status.DelegationTarget).To(BeEmpty())
+		Expect(got.Status.RequiredDNSRecords[0].Content).NotTo(Equal(got.Status.RequiredDNSRecords[1].Content))
+	})
+
+	It("assigns a new target when the namespace is deleted and recreated", func() {
+		nsName := newProjectNamespace(k8sClient)
+		tc := newTLSCertificate(nsName, "recreate", certificatesv1alpha1.IssuanceModeDNS01, "*.recreate.example.com")
+		Expect(k8sClient.Create(ctx, tc)).To(Succeed())
+		Eventually(get(tc)).Should(HaveField("Status.DelegationTarget", Not(BeEmpty())))
+		before := get(tc)(Default).Status.DelegationTarget
+
+		Expect(k8sClient.Delete(ctx, tc)).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(tc), &certificatesv1alpha1.TLSCertificate{}))
+		}).Should(BeTrue())
+
+		clientset, err := kubernetes.NewForConfig(cfg)
+		Expect(err).NotTo(HaveOccurred())
+		var namespace corev1.Namespace
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: nsName}, &namespace)).To(Succeed())
+		oldUID := namespace.UID
+		Expect(k8sClient.Delete(ctx, &namespace)).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: nsName}, &namespace)).To(Succeed())
+		namespace.Spec.Finalizers = nil
+		_, err = clientset.CoreV1().Namespaces().Finalize(ctx, &namespace, metav1.UpdateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: nsName}, &corev1.Namespace{}))
+		}).Should(BeTrue())
+
+		Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: nsName}, &namespace)).To(Succeed())
+		Expect(namespace.UID).NotTo(Equal(oldUID))
+
+		recreated := newTLSCertificate(nsName, "recreate", certificatesv1alpha1.IssuanceModeDNS01, "*.recreate.example.com")
+		Eventually(func() error { return k8sClient.Create(ctx, recreated) }).Should(Succeed())
+		Eventually(get(recreated)).Should(HaveField("Status.DelegationTarget", And(Not(BeEmpty()), Not(Equal(before)))))
 	})
 
 	It("replaces the stored copy only with a newer, matching issuance and carries renewals to the project", func() {

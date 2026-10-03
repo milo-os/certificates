@@ -56,9 +56,14 @@ const (
 	// TLSCertificate it was created for.
 	UpstreamUIDLabel = "certificates.miloapis.com/upstream-uid"
 
-	defaultResyncInterval          = time.Hour
-	defaultMaxConcurrentReconciles = 8
-	maxConditionMessage            = 512
+	defaultDelegationRecheckInterval = time.Minute
+	defaultDelegatedRecheckInterval  = 15 * time.Minute
+	defaultResyncInterval            = time.Hour
+	defaultMaxConcurrentReconciles   = 8
+	defaultSuspendAfterFailures      = 3
+	defaultSuspendAfter              = 30 * time.Minute
+	defaultMaxUnconfirmed            = 48 * time.Hour
+	maxConditionMessage              = 512
 )
 
 var knownConditions = []string{
@@ -76,10 +81,18 @@ var knownConditions = []string{
 type TLSCertificateReconciler struct {
 	CertificateNamespace string
 	HTTP01ClusterIssuer  string
+	DNS01ClusterIssuer   string
+	DNS01DelegationZone  string
 	DeniedDomainSuffixes []string
+	Resolver             CNAMEResolver
 
-	ResyncInterval          time.Duration
-	MaxConcurrentReconciles int
+	DelegationRecheckInterval time.Duration
+	DelegatedRecheckInterval  time.Duration
+	ResyncInterval            time.Duration
+	MaxConcurrentReconciles   int
+	SuspendAfterFailures      int
+	SuspendAfter              time.Duration
+	MaxUnconfirmed            time.Duration
 
 	mgr mcmanager.Manager
 }
@@ -87,6 +100,7 @@ type TLSCertificateReconciler struct {
 // +kubebuilder:rbac:groups=certificates.miloapis.com,resources=tlscertificates,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=certificates.miloapis.com,resources=tlscertificates/status,verbs=update;patch
 // +kubebuilder:rbac:groups=certificates.miloapis.com,resources=tlscertificates/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete,namespace=certificates-system
 // +kubebuilder:rbac:groups=acme.cert-manager.io,resources=orders;challenges,verbs=get;list;watch,namespace=certificates-system
 // +kubebuilder:rbac:groups=core,resources=secrets;configmaps,verbs=get;list;watch;create;update;patch;delete,namespace=certificates-system
@@ -177,6 +191,11 @@ func (r *TLSCertificateReconciler) computeStatus(
 		return result, nil
 	}
 
+	anchor, err := r.ensureAnchor(ctx, clusterName, tc, certName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	issuer, reason, msg := r.issuerFor(tc, mode)
 	if issuer == "" {
 		if err := r.suspend(ctx, cert); err != nil {
@@ -190,15 +209,64 @@ func (r *TLSCertificateReconciler) computeStatus(
 	}
 	r.setCondition(tc, certificatesv1alpha1.ConditionAccepted, metav1.ConditionTrue, "Accepted", fmt.Sprintf("Issuing with %s.", mode))
 
-	cert, err := r.ensureCertificate(ctx, clusterName, tc, certName, issuer)
-	if err != nil {
-		return ctrl.Result{}, err
+	issue := true
+	if mode == certificatesv1alpha1.ChallengeTypeDNS01 {
+		targets, err := r.delegationTargets(ctx, cl, clusterName, tc)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		tc.Status.RequiredDNSRecords = requiredDNS01Records(tc.Spec.DNSNames, targets)
+		if len(targets) == 1 {
+			tc.Status.DelegationTarget = tc.Status.RequiredDNSRecords[0].Content
+		}
+
+		state, problems := checkDelegation(ctx, r.Resolver, tc.Status.RequiredDNSRecords)
+		suspend, unconfirmed, err := r.recordDelegation(ctx, anchor, state)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		delegationUnconfirmedSeconds.WithLabelValues(string(clusterName), tc.Namespace, tc.Name).Set(unconfirmed.Seconds())
+		switch state {
+		case delegationOK:
+			r.setCondition(tc, certificatesv1alpha1.ConditionDNSDelegationReady, metav1.ConditionTrue, "CNAMEResolved",
+				"Every _acme-challenge record resolves to its delegation target.")
+			result.RequeueAfter = min(result.RequeueAfter, r.delegatedRecheckInterval())
+		case delegationUnknown:
+			issue = cert != nil && !suspend
+			reason, prefix := "LookupFailed", "Delegation could not be checked: "
+			if suspend {
+				reason, prefix = "DelegationUnconfirmed", "Renewal is suspended because delegation has not been confirmed for "+unconfirmed.Truncate(time.Minute).String()+": "
+			}
+			r.setCondition(tc, certificatesv1alpha1.ConditionDNSDelegationReady, metav1.ConditionUnknown, reason,
+				truncate(prefix+strings.Join(problems, "; ")))
+			result.RequeueAfter = r.delegationRecheckInterval()
+		case delegationBroken:
+			issue = cert != nil && !suspend
+			r.setCondition(tc, certificatesv1alpha1.ConditionDNSDelegationReady, metav1.ConditionFalse, "CNAMENotFound",
+				truncate("Publish the records in status.requiredDNSRecords: "+strings.Join(problems, "; ")))
+			result.RequeueAfter = r.delegationRecheckInterval()
+		}
+	} else {
+		apimeta.RemoveStatusCondition(&tc.Status.Conditions, certificatesv1alpha1.ConditionDNSDelegationReady)
+		delegationUnconfirmedSeconds.DeleteLabelValues(string(clusterName), tc.Namespace, tc.Name)
 	}
-	acmeErr, err := r.observeChallenges(ctx, tc, certName)
-	if err != nil {
-		return ctrl.Result{}, err
+
+	if issue {
+		if cert, err = r.ensureCertificate(ctx, clusterName, tc, certName, issuer); err != nil {
+			return ctrl.Result{}, err
+		}
+		acmeErr, err := r.observeChallenges(ctx, tc, certName)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		r.observeCertificate(tc, cert, acmeErr)
+	} else {
+		if err := r.suspend(ctx, cert); err != nil {
+			return ctrl.Result{}, err
+		}
+		r.setCondition(tc, certificatesv1alpha1.ConditionIssuing, metav1.ConditionFalse, "WaitingForDNSDelegation",
+			"Issuance and renewal start once the DNS delegation records resolve.")
 	}
-	r.observeCertificate(tc, cert, acmeErr)
 
 	notAfter, err := r.syncProjectSecret(ctx, cl, tc, certName, secretName)
 	if err != nil {
@@ -213,12 +281,15 @@ func (r *TLSCertificateReconciler) computeStatus(
 }
 
 func (r *TLSCertificateReconciler) issuerFor(tc *certificatesv1alpha1.TLSCertificate, mode certificatesv1alpha1.ChallengeType) (string, string, string) {
-	if errs := validation.ValidateSpec(tc.Spec, field.NewPath("spec"), r.DeniedDomainSuffixes); len(errs) > 0 {
+	if errs := validation.ValidateSpec(tc.Spec, field.NewPath("spec"), r.deniedSuffixes()); len(errs) > 0 {
 		return "", "InvalidSpec", truncate(errs.ToAggregate().Error())
 	}
 	switch mode {
 	case certificatesv1alpha1.ChallengeTypeDNS01:
-		return "", "IssuanceModeUnavailable", "DNS01 issuance is not available."
+		if r.DNS01ClusterIssuer == "" || r.DNS01DelegationZone == "" {
+			return "", "IssuanceModeUnavailable", "DNS01 issuance is not available."
+		}
+		return r.DNS01ClusterIssuer, "", ""
 	default:
 		if r.HTTP01ClusterIssuer == "" {
 			return "", "IssuanceModeUnavailable", "HTTP01 issuance is not available."
@@ -580,6 +651,7 @@ func (r *TLSCertificateReconciler) finalize(ctx context.Context, cl cluster.Clus
 	if err := deleteServiceResources(ctx, r.mgr.GetLocalManager().GetClient(), r.CertificateNamespace, certName); err != nil {
 		return err
 	}
+	delegationUnconfirmedSeconds.DeleteLabelValues(string(clusterName), tc.Namespace, tc.Name)
 
 	base := tc.DeepCopy()
 	controllerutil.RemoveFinalizer(tc, tlsCertificateFinalizer)
@@ -619,6 +691,20 @@ func truncate(msg string) string {
 		return msg[:maxConditionMessage]
 	}
 	return msg
+}
+
+func (r *TLSCertificateReconciler) delegationRecheckInterval() time.Duration {
+	if r.DelegationRecheckInterval > 0 {
+		return r.DelegationRecheckInterval
+	}
+	return defaultDelegationRecheckInterval
+}
+
+func (r *TLSCertificateReconciler) delegatedRecheckInterval() time.Duration {
+	if r.DelegatedRecheckInterval > 0 {
+		return r.DelegatedRecheckInterval
+	}
+	return defaultDelegatedRecheckInterval
 }
 
 func (r *TLSCertificateReconciler) resyncInterval() time.Duration {

@@ -5,6 +5,14 @@ metadata:
   name: certificates-manager
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - certificates.miloapis.com
   resources:
   - tlscertificates

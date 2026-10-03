@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
+	"time"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
@@ -58,16 +60,30 @@ func init() {
 type issuanceFlags struct {
 	certificateNamespace string
 	http01ClusterIssuer  string
+	dns01ClusterIssuer   string
+	dns01DelegationZone  string
+	dnsResolverAddress   string
 	deniedDomainSuffixes []string
 	writerIdentities     []string
 	serviceIdentities    []string
 	deleterIdentities    []string
 	maxConcurrent        int
+	maxUnconfirmed       time.Duration
+}
+
+func (f issuanceFlags) denied() []string {
+	if f.dns01DelegationZone == "" {
+		return f.deniedDomainSuffixes
+	}
+	return append(slices.Clone(f.deniedDomainSuffixes), f.dns01DelegationZone)
 }
 
 func (f issuanceFlags) validate() error {
 	if f.certificateNamespace == "" {
 		return errors.New("--certificate-namespace is required")
+	}
+	if (f.dns01ClusterIssuer == "") != (f.dns01DelegationZone == "") {
+		return errors.New("--dns01-cluster-issuer and --dns01-delegation-zone must be set together")
 	}
 	return nil
 }
@@ -205,15 +221,19 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 			if err := (&controller.TLSCertificateReconciler{
 				CertificateNamespace:    issuance.certificateNamespace,
 				HTTP01ClusterIssuer:     issuance.http01ClusterIssuer,
+				DNS01ClusterIssuer:      issuance.dns01ClusterIssuer,
+				DNS01DelegationZone:     issuance.dns01DelegationZone,
 				DeniedDomainSuffixes:    issuance.deniedDomainSuffixes,
+				Resolver:                controller.NewResolver(issuance.dnsResolverAddress),
 				MaxConcurrentReconciles: issuance.maxConcurrent,
+				MaxUnconfirmed:          issuance.maxUnconfirmed,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("creating TLSCertificate controller: %w", err)
 			}
 
 			if serverConfig.WebhookServer != nil {
 				if err := webhookv1alpha1.SetupWebhookWithManager(mgr.GetLocalManager(), &webhookv1alpha1.Validator{
-					DeniedDomainSuffixes: issuance.deniedDomainSuffixes,
+					DeniedDomainSuffixes: issuance.denied(),
 					WriterIdentities:     issuance.writerIdentities,
 					ServiceIdentities:    issuance.serviceIdentities,
 					DeleterIdentities:    issuance.deleterIdentities,
@@ -255,8 +275,12 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 		"Namespace on the local cluster that holds the cert-manager Certificates and issued Secrets backing every TLSCertificate.")
 	cmd.Flags().StringVar(&issuance.http01ClusterIssuer, "http01-cluster-issuer", "",
 		"cert-manager ClusterIssuer used for HTTP01 issuance. HTTP01 TLSCertificates are not accepted when empty.")
+	cmd.Flags().StringVar(&issuance.dns01ClusterIssuer, "dns01-cluster-issuer", "",
+		"cert-manager ClusterIssuer used for DNS01 issuance. It must follow CNAMEs into --dns01-delegation-zone. DNS01 TLSCertificates are not accepted when empty.")
+	cmd.Flags().StringVar(&issuance.dns01DelegationZone, "dns01-delegation-zone", "",
+		"DNS zone the DNS01 issuer writes challenge records into. Each name's _acme-challenge record must be a CNAME to the random target in the TLSCertificate's status.delegationTarget, under this zone.")
 	cmd.Flags().StringSliceVar(&issuance.deniedDomainSuffixes, "denied-domain-suffixes", []string{"datumproxy.net", "datum.net", "datum-staging.net", "datumdomains.net", "miloapis.com", "datumapis.com"},
-		"Domains the service never issues for, including every name beneath them.")
+		"Domains the service never issues for, including every name beneath them. The DNS01 delegation zone is always denied.")
 	cmd.Flags().StringSliceVar(&issuance.writerIdentities, "allowed-writer-identities", []string{"system:control@networking.datumapis.com"},
 		"Usernames allowed to create, change or delete TLSCertificates. Empty turns off every identity check except the status one.")
 	cmd.Flags().StringSliceVar(&issuance.serviceIdentities, "service-identities", nil,
@@ -264,7 +288,11 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 	cmd.Flags().StringSliceVar(&issuance.deleterIdentities, "allowed-deleter-identities",
 		[]string{"system:control@platform.miloapis.com", "system:serviceaccount:kube-system:namespace-controller", "system:serviceaccount:kube-system:generic-garbage-collector"},
 		"Usernames allowed to delete TLSCertificates and make metadata-only changes to them, in addition to the writer and service identities: the identities project control planes use for namespace deletion and garbage collection. Milo's controller manager uses system:control@platform.miloapis.com (preview environments use control@platform.miloapis.com, without the system: prefix, and must override this flag); the kube-system ServiceAccounts cover a stock kube-controller-manager.")
+	cmd.Flags().DurationVar(&issuance.maxUnconfirmed, "dns01-max-unconfirmed", 48*time.Hour,
+		"How long DNS01 renewal continues while delegation lookups keep failing without a definitive answer. Alert on certificates_dns01_delegation_unconfirmed_seconds well before this.")
 	cmd.Flags().IntVar(&issuance.maxConcurrent, "max-concurrent-reconciles", 8, "Number of TLSCertificates reconciled in parallel.")
+	cmd.Flags().StringVar(&issuance.dnsResolverAddress, "dns-resolver-address", "",
+		"host:port of the DNS server used to check DNS01 delegation. Uses the system resolvers when empty.")
 
 	zapFlags := flag.NewFlagSet("zap", flag.ContinueOnError)
 	opts.BindFlags(zapFlags)

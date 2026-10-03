@@ -22,11 +22,29 @@ spec:
   HTTP01 cannot issue wildcards.
 - The service does not verify that the project controls the names. Callers
   create a `TLSCertificate` only for names they have already verified. Names
-  under `--denied-domain-suffixes` are always rejected, as are public
-  suffixes and names whose top-level domain is not a public ICANN domain.
+  under `--denied-domain-suffixes` and the DNS01 delegation zone are always
+  rejected, as are public suffixes and names whose top-level domain is not a
+  public ICANN domain.
 - HTTP01: the consumer serves each entry in `status.challenges` at
   `http://<dnsName>/.well-known/acme-challenge/<token>` with body `<key>`.
-- DNS01 requests, including every wildcard, are not accepted yet.
+- DNS01: the service assigns each name a random delegation target, listed in
+  `status.requiredDNSRecords`, which is authoritative. `status.delegationTarget`
+  is set only when the spec has a single DNS01 name.
+  The name's owner publishes `_acme-challenge.<name>` as a CNAME to it.
+  Targets are held per project namespace and name, so recreating a
+  TLSCertificate for the same name in the same namespace keeps the target
+  and the published CNAME keeps working. Issuance starts only once every
+  CNAME resolves to its exact target.
+- Renewal is suspended when delegation is definitively broken (the record
+  does not exist, or points elsewhere) on three checks spanning at least 30
+  minutes, and a good result resets the count. Timeouts, server failures and
+  other lookup errors leave the state alone, but only for
+  `--dns01-max-unconfirmed` (48 hours): with no definitive result for that
+  long, renewal is suspended and `DNSDelegationReady` turns `Unknown` with
+  reason `DelegationUnconfirmed`. The
+  `certificates_dns01_delegation_unconfirmed_seconds` metric reports how long
+  each certificate has gone unconfirmed; alert on it passing an hour. The
+  current certificate keeps being served while suspended.
 - `dnsNames`, `issuance` and `secretName` are immutable.
 - Once issued, the certificate is written to the Secret named in
   `status.secretRef` and owned by the `TLSCertificate`. Platform components
@@ -41,13 +59,16 @@ The service runs on the cluster that hosts cert-manager. It discovers project
 control planes through Milo's multicluster-runtime provider and watches
 `TLSCertificates` in each one. Per `TLSCertificate` it owns:
 
-- a cert-manager `Certificate` and the service's own copy of the issued key
-  pair, both named
+- a delegation anchor ConfigMap per project namespace and DNS01 name,
+  `dt-<sha256(cluster/namespace-uid/name)[:32]>`, holding the random token.
+  It outlives the TLSCertificate;
+- an anchor ConfigMap recording delegation checks, a cert-manager
+  `Certificate`, and the service's own copy of the issued key pair, all named
   `tc-<sha256(cluster/namespace/name/uid)[:32]>` in `--certificate-namespace`
   and labelled with the TLSCertificate's UID. cert-manager writes to
   `<name>-issuing`; the service copies each valid issuance into `<name>`,
   which nothing else owns, and `status.serviceSecretRef` points there. The
-  Certificate also carries the upstream cluster, namespace and name;
+  Certificate and anchor also carry the upstream cluster, namespace and name;
   the Secrets do not, so edge propagation policies never select them;
 - the project Secret, written with server-side apply without forcing
   ownership, so a Secret the service did not create is never overwritten. It
@@ -60,12 +81,12 @@ it was issued after the copy already held. Ordering by issue time lets an
 emergency re-key with a shorter lifetime replace a compromised key at once.
 
 The service deletes the cert-manager `Certificate` whenever the spec is no
-longer accepted, so cert-manager cannot renew
+longer accepted or DNS01 renewal is suspended, so cert-manager cannot renew
 it. The service's copy of the key pair is unaffected, so cert-manager may run
 with or without `--enable-certificate-owner-ref`.
 
 A project Secret deleted by hand is restored on the next periodic reconcile:
-within an hour. Platform consumers read
+within 15 minutes for DNS01 and an hour for HTTP01. Platform consumers read
 the service-side Secret, so they are unaffected.
 
 A finalizer removes the service-side resources when the `TLSCertificate` is
@@ -75,13 +96,17 @@ deleted.
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--certificate-namespace` | `certificates-system` | Namespace holding the service-side Certificates and issued Secrets |
+| `--certificate-namespace` | `certificates-system` | Namespace holding the service-side Certificates, issued Secrets and delegation tokens |
 | `--http01-cluster-issuer` | empty | cert-manager ClusterIssuer for HTTP01. HTTP01 requests are not accepted when empty |
+| `--dns01-cluster-issuer` | empty | cert-manager ClusterIssuer for DNS01. It must follow CNAMEs (`cnameStrategy: Follow`) and be able to write only to the delegation zone |
+| `--dns01-delegation-zone` | empty | Zone the DNS01 issuer writes challenge records into. Required with `--dns01-cluster-issuer` |
 | `--denied-domain-suffixes` | `datumproxy.net,datum.net,datum-staging.net,datumdomains.net,miloapis.com,datumapis.com` | Domains never issued for, including every name beneath them |
 | `--allowed-writer-identities` | `system:control@networking.datumapis.com` | Usernames allowed to create, change or delete a `TLSCertificate`. Empty turns off every identity check except the status one |
 | `--service-identities` | empty | The service's usernames in project control planes. Only they may write status. Required when the webhook is enabled |
 | `--allowed-deleter-identities` | `system:control@platform.miloapis.com`, kube-system namespace-controller and generic-garbage-collector | Extra usernames allowed to delete a `TLSCertificate` and make metadata-only changes, such as removing finalizers: whatever deletes namespaces and collects garbage in project control planes. Milo's controller manager uses `system:control@platform.miloapis.com`. Preview environments use `control@platform.miloapis.com`, without the `system:` prefix, and must override this flag. The kube-system ServiceAccounts apply only to a stock kube-controller-manager |
 | `--max-concurrent-reconciles` | `8` | TLSCertificates reconciled in parallel |
+| `--dns01-max-unconfirmed` | `48h` | How long DNS01 renewal continues while delegation lookups fail without a definitive answer |
+| `--dns-resolver-address` | empty | `host:port` of the DNS server used for delegation checks. Uses the system resolvers when empty |
 | `--server-config` | empty | Path to the operator config file |
 | `--leader-elect`, `--leader-elect-namespace`, `--health-probe-bind-address` | | Standard manager flags |
 
@@ -121,6 +146,7 @@ mode, the service needs:
 - `tlscertificates`: get, list, watch, patch
 - `tlscertificates/status`: update, patch
 - `tlscertificates/finalizers`: update
+- `namespaces`: get, list, watch
 - `secrets`: create, patch (server-side apply needs both to create a Secret)
 
 It never reads or deletes project Secrets. Each project Secret carries a

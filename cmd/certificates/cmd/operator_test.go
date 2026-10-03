@@ -48,3 +48,14 @@ func TestDefaultFlagsRequireServiceIdentitiesWithWebhook(t *testing.T) {
 		}
 	}
 }
+
+func TestDNS01FlagsMustBeSetTogether(t *testing.T) {
+	f := issuanceFlags{certificateNamespace: "certificates-system", dns01ClusterIssuer: "dns01"}
+	if err := f.validate(); err == nil {
+		t.Fatal("expected an error when the delegation zone is missing")
+	}
+	f.dns01DelegationZone = "acme-dns.example.net"
+	if err := f.validate(); err != nil {
+		t.Fatal(err)
+	}
+}

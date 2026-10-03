@@ -1,0 +1,13 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: certificates.miloapis.com-tlscertificate-viewer
+  annotations:
+    kubernetes.io/display-name: TLS Certificate Viewer
+    kubernetes.io/description: "Read access to TLS certificates issued for a project"
+spec:
+  launchStage: Alpha
+  includedPermissions:
+    - certificates.miloapis.com/tlscertificates.list
+    - certificates.miloapis.com/tlscertificates.get
+    - certificates.miloapis.com/tlscertificates.watch

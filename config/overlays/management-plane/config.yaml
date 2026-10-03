@@ -1,0 +1,13 @@
+apiVersion: apiserver.config.miloapis.com/v1alpha1
+kind: TLSCertificateOperator
+metricsServer:
+  bindAddress: ":9090"
+  secureServing: false
+webhookServer:
+  tls:
+    certDir: /etc/kubernetes/pki/webhook
+discovery:
+  mode: milo
+  internalServiceDiscovery: false
+  discoveryKubeconfigPath: /etc/kubernetes/project-discovery/auth/discovery-kubeconfig.yaml
+  projectKubeconfigPath: /etc/kubernetes/projects/auth/project-kubeconfig-template.yaml

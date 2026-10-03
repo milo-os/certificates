@@ -1,0 +1,22 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: certificates.miloapis.com-tlscertificate
+spec:
+  serviceRef:
+    name: "certificates.miloapis.com"
+  kind: TLSCertificate
+  plural: tlscertificates
+  singular: tlscertificate
+  permissions:
+    - list
+    - get
+    - watch
+    - create
+    - update
+    - patch
+    - delete
+    - updateStatus
+  parentResources:
+    - apiGroup: resourcemanager.miloapis.com
+      kind: Project

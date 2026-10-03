@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	multiclusterproviders "go.miloapis.com/milo/pkg/multicluster-runtime"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -36,11 +37,14 @@ type TLSCertificateOperator struct {
 	// is required.
 	WebhookServer *WebhookServerConfig `json:"webhookServer,omitempty"`
 
-	// KubeconfigPath is the path to the kubeconfig file pointing at the Milo
-	// control plane API server where tlscertificates are stored. When empty, the
+	// KubeconfigPath is the path to the kubeconfig file for the cluster that
+	// runs cert-manager and holds the service-side Certificates. When empty, the
 	// controller falls back to in-cluster config / $KUBECONFIG via
-	// ctrl.GetConfig(), which is useful for local development.
+	// ctrl.GetConfig().
 	KubeconfigPath string `json:"kubeconfigPath,omitempty"`
+
+	// Discovery configures how the operator finds project control planes.
+	Discovery DiscoveryConfig `json:"discovery"`
 }
 
 // RestConfig returns the *rest.Config used to connect to the Milo control plane.
@@ -202,14 +206,52 @@ func SetDefaults_TLSConfig(obj *TLSConfig) {
 	}
 }
 
+// +k8s:deepcopy-gen=true
+
+// DiscoveryConfig configures project control plane discovery.
+type DiscoveryConfig struct {
+	// Mode is the discovery mode: "single" watches TLSCertificates in the
+	// local cluster, "milo" watches every Milo project control plane.
+	Mode multiclusterproviders.Provider `json:"mode"`
+
+	// InternalServiceDiscovery discovers projects through ProjectControlPlane
+	// resources and connects to their internal service addresses.
+	InternalServiceDiscovery bool `json:"internalServiceDiscovery"`
+
+	// DiscoveryKubeconfigPath is the kubeconfig used to discover projects.
+	// Defaults to the in-cluster config.
+	DiscoveryKubeconfigPath string `json:"discoveryKubeconfigPath"`
+
+	// ProjectKubeconfigPath is the kubeconfig used as a template when
+	// connecting to project control planes. Defaults to the in-cluster config.
+	ProjectKubeconfigPath string `json:"projectKubeconfigPath"`
+}
+
+func (c *DiscoveryConfig) DiscoveryRestConfig() (*rest.Config, error) {
+	if c.DiscoveryKubeconfigPath == "" {
+		return ctrl.GetConfig()
+	}
+	return clientcmd.BuildConfigFromFlags("", c.DiscoveryKubeconfigPath)
+}
+
+func (c *DiscoveryConfig) ProjectRestConfig() (*rest.Config, error) {
+	if c.ProjectKubeconfigPath == "" {
+		return ctrl.GetConfig()
+	}
+	return clientcmd.BuildConfigFromFlags("", c.ProjectKubeconfigPath)
+}
+
+func SetDefaults_DiscoveryConfig(obj *DiscoveryConfig) {
+	if obj.Mode == "" {
+		obj.Mode = multiclusterproviders.ProviderSingle
+	}
+}
+
 // SetDefaults_TLSCertificateOperator sets defaults for TLSCertificateOperator.
 // The generated SetObjectDefaults_TLSCertificateOperator handles calling nested
 // defaults (MetricsServerConfig, WebhookServerConfig, TLSConfig), so this
 // function only sets top-level defaults.
-func SetDefaults_TLSCertificateOperator(obj *TLSCertificateOperator) {
-	// Top-level defaults are handled by nested SetDefaults_* functions
-	// which are called by the generated SetObjectDefaults_TLSCertificateOperator.
-}
+func SetDefaults_TLSCertificateOperator(obj *TLSCertificateOperator) {}
 
 func init() {
 	SchemeBuilder.Register(&TLSCertificateOperator{})

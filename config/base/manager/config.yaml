@@ -3,6 +3,12 @@ kind: TLSCertificateOperator
 metricsServer:
   bindAddress: "0"
 webhookServer: {}
-# kubeconfigPath points at the Milo control plane API server.
-# Leave empty to use in-cluster config (default when deployed alongside the API server).
-# kubeconfigPath: /etc/milo/kubeconfig
+# kubeconfigPath points at the cluster that runs cert-manager and holds the
+# service-side Certificates. Leave empty to use in-cluster config.
+# kubeconfigPath: /etc/certificates/kubeconfig
+# discovery selects how project control planes are found. The default,
+# "single", reconciles TLSCertificates in the local cluster only.
+# discovery:
+#   mode: milo
+#   discoveryKubeconfigPath: /etc/milo/discovery/kubeconfig
+#   projectKubeconfigPath: /etc/milo/project/kubeconfig

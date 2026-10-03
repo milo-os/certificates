@@ -20,26 +20,112 @@ spec:
 
 - `issuance: Auto` uses DNS01 when any name is a wildcard and HTTP01 otherwise.
   HTTP01 cannot issue wildcards.
-- The admission webhook enforces these rules and limits who may write
-  `TLSCertificates`; see the identity flags below.
 - The service does not verify that the project controls the names. Callers
   create a `TLSCertificate` only for names they have already verified. Names
   under `--denied-domain-suffixes` are always rejected, as are public
   suffixes and names whose top-level domain is not a public ICANN domain.
+- HTTP01: the consumer serves each entry in `status.challenges` at
+  `http://<dnsName>/.well-known/acme-challenge/<token>` with body `<key>`.
+- DNS01 requests, including every wildcard, are not accepted yet.
 - `dnsNames`, `issuance` and `secretName` are immutable.
+- Once issued, the certificate is written to the Secret named in
+  `status.secretRef` and owned by the `TLSCertificate`. Platform components
+  that distribute the certificate read it from `status.serviceSecretRef`, the
+  copy on the service cluster.
 - Conditions: `Accepted`, `DNSDelegationReady` (DNS01 only), `Issuing` and
   `Ready`.
+
+## How it runs
+
+The service runs on the cluster that hosts cert-manager. It discovers project
+control planes through Milo's multicluster-runtime provider and watches
+`TLSCertificates` in each one. Per `TLSCertificate` it owns:
+
+- a cert-manager `Certificate` and the service's own copy of the issued key
+  pair, both named
+  `tc-<sha256(cluster/namespace/name/uid)[:32]>` in `--certificate-namespace`
+  and labelled with the TLSCertificate's UID. cert-manager writes to
+  `<name>-issuing`; the service copies each valid issuance into `<name>`,
+  which nothing else owns, and `status.serviceSecretRef` points there. The
+  Certificate also carries the upstream cluster, namespace and name;
+  the Secrets do not, so edge propagation policies never select them;
+- the project Secret, written with server-side apply without forcing
+  ownership, so a Secret the service did not create is never overwritten. It
+  carries a controller reference to the `TLSCertificate` and is removed by
+  garbage collection.
+
+An issuance is copied only when its UID label matches the `TLSCertificate`,
+its names equal `spec.dnsNames` exactly, its key matches its certificate, and
+it was issued after the copy already held. Ordering by issue time lets an
+emergency re-key with a shorter lifetime replace a compromised key at once.
+
+The service deletes the cert-manager `Certificate` whenever the spec is no
+longer accepted, so cert-manager cannot renew
+it. The service's copy of the key pair is unaffected, so cert-manager may run
+with or without `--enable-certificate-owner-ref`.
+
+A project Secret deleted by hand is restored on the next periodic reconcile:
+within an hour. Platform consumers read
+the service-side Secret, so they are unaffected.
+
+A finalizer removes the service-side resources when the `TLSCertificate` is
+deleted.
 
 ## Flags
 
 | Flag | Default | Purpose |
 |------|---------|---------|
+| `--certificate-namespace` | `certificates-system` | Namespace holding the service-side Certificates and issued Secrets |
+| `--http01-cluster-issuer` | empty | cert-manager ClusterIssuer for HTTP01. HTTP01 requests are not accepted when empty |
 | `--denied-domain-suffixes` | `datumproxy.net,datum.net,datum-staging.net,datumdomains.net,miloapis.com,datumapis.com` | Domains never issued for, including every name beneath them |
 | `--allowed-writer-identities` | `system:control@networking.datumapis.com` | Usernames allowed to create, change or delete a `TLSCertificate`. Empty turns off every identity check except the status one |
 | `--service-identities` | empty | The service's usernames in project control planes. Only they may write status. Required when the webhook is enabled |
 | `--allowed-deleter-identities` | `system:control@platform.miloapis.com`, kube-system namespace-controller and generic-garbage-collector | Extra usernames allowed to delete a `TLSCertificate` and make metadata-only changes, such as removing finalizers: whatever deletes namespaces and collects garbage in project control planes. Milo's controller manager uses `system:control@platform.miloapis.com`. Preview environments use `control@platform.miloapis.com`, without the `system:` prefix, and must override this flag. The kube-system ServiceAccounts apply only to a stock kube-controller-manager |
+| `--max-concurrent-reconciles` | `8` | TLSCertificates reconciled in parallel |
 | `--server-config` | empty | Path to the operator config file |
 | `--leader-elect`, `--leader-elect-namespace`, `--health-probe-bind-address` | | Standard manager flags |
+
+Point the issuers at the ACME staging endpoint in non-production environments;
+the service never hardcodes an ACME server.
+
+## Operator config
+
+```yaml
+apiVersion: apiserver.config.miloapis.com/v1alpha1
+kind: TLSCertificateOperator
+metricsServer:
+  bindAddress: "0"
+webhookServer: {}
+kubeconfigPath: ""
+discovery:
+  mode: milo
+  internalServiceDiscovery: false
+  discoveryKubeconfigPath: /etc/milo/discovery/kubeconfig
+  projectKubeconfigPath: /etc/milo/project/kubeconfig
+```
+
+- `kubeconfigPath`: the cluster that runs cert-manager. Empty uses in-cluster
+  config.
+- `discovery.mode`: `single` reconciles `TLSCertificates` in the local cluster,
+  `milo` reconciles every project control plane.
+
+## Permissions
+
+On the service cluster, a Role in the certificate namespace covers
+`certificates`, `orders` and `challenges` (read), `secrets` and `configmaps`.
+The ClusterRole covers only `tlscertificates`.
+
+In each project control plane, and on the local cluster in `single` discovery
+mode, the service needs:
+
+- `tlscertificates`: get, list, watch, patch
+- `tlscertificates/status`: update, patch
+- `tlscertificates/finalizers`: update
+- `secrets`: create, patch (server-side apply needs both to create a Secret)
+
+It never reads or deletes project Secrets. Each project Secret carries a
+controller reference to its `TLSCertificate`, so project control planes must
+run garbage collection to remove it with the `TLSCertificate`.
 
 ## Prerequisites
 

@@ -29,9 +29,18 @@ patches:
       kind: Deployment
       name: certificates-manager
     patch: |-
-      - op: add
-        path: /spec/template/spec/containers/0/args/-
-        value: --service-identities=system:serviceaccount:certificates-system:certificates-manager
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: certificates-manager
+      spec:
+        template:
+          spec:
+            containers:
+              - name: manager
+                env:
+                  - name: SERVICE_IDENTITIES
+                    value: system:serviceaccount:certificates-system:certificates-manager
   - target:
       kind: Certificate
       name: certificates-serving-cert

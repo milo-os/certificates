@@ -46,11 +46,32 @@ spec:
           - --leader-elect-namespace=$(POD_NAMESPACE)
           - --health-probe-bind-address=:8081
           - --server-config=/config/config.yaml
+          - --certificate-namespace=$(CERTIFICATE_NAMESPACE)
+          - --http01-cluster-issuer=$(HTTP01_CLUSTER_ISSUER)
+          - --dns01-cluster-issuer=$(DNS01_CLUSTER_ISSUER)
+          - --dns01-delegation-zone=$(DNS01_DELEGATION_ZONE)
+          - --denied-domain-suffixes=$(DENIED_DOMAIN_SUFFIXES)
+          - --service-identities=$(SERVICE_IDENTITIES)
+          - --allowed-deleter-identities=$(ALLOWED_DELETER_IDENTITIES)
         env:
           - name: POD_NAMESPACE
             valueFrom:
               fieldRef:
                 fieldPath: metadata.namespace
+          - name: CERTIFICATE_NAMESPACE
+            value: certificates-system
+          - name: HTTP01_CLUSTER_ISSUER
+            value: ""
+          - name: DNS01_CLUSTER_ISSUER
+            value: ""
+          - name: DNS01_DELEGATION_ZONE
+            value: ""
+          - name: DENIED_DOMAIN_SUFFIXES
+            value: datumproxy.net,datum.net,datum-staging.net,datumdomains.net,miloapis.com,datumapis.com
+          - name: SERVICE_IDENTITIES
+            value: ""
+          - name: ALLOWED_DELETER_IDENTITIES
+            value: system:control@platform.miloapis.com,system:serviceaccount:kube-system:namespace-controller,system:serviceaccount:kube-system:generic-garbage-collector
         image: ghcr.io/milo-os/certificates:dev
         name: manager
         ports:

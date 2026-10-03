@@ -20,7 +20,10 @@ import (
 	milomulticluster "go.miloapis.com/milo/pkg/multicluster-runtime/milo"
 	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -180,7 +183,7 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 				return fmt.Errorf("creating local cluster: %w", err)
 			}
 
-			runnables, provider, err := initializeClusterDiscovery(serverConfig, deploymentCluster)
+			runnables, provider, projects, err := initializeClusterDiscovery(serverConfig, deploymentCluster)
 			if err != nil {
 				return fmt.Errorf("initializing cluster discovery: %w", err)
 			}
@@ -229,6 +232,14 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 				MaxUnconfirmed:          issuance.maxUnconfirmed,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("creating TLSCertificate controller: %w", err)
+			}
+
+			if err := mgr.GetLocalManager().Add(&controller.OrphanSweeper{
+				Manager:              mgr,
+				Projects:             projects,
+				CertificateNamespace: issuance.certificateNamespace,
+			}); err != nil {
+				return fmt.Errorf("adding orphan sweeper: %w", err)
 			}
 
 			if serverConfig.WebhookServer != nil {
@@ -304,7 +315,7 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 func initializeClusterDiscovery(
 	serverConfig config.TLSCertificateOperator,
 	deploymentCluster cluster.Cluster,
-) (runnables []manager.Runnable, provider multicluster.Provider, err error) {
+) (runnables []manager.Runnable, provider multicluster.Provider, projects controller.ProjectChecker, err error) {
 	switch serverConfig.Discovery.Mode {
 	case multiclusterproviders.ProviderSingle:
 		runnables = append(runnables, deploymentCluster)
@@ -313,12 +324,12 @@ func initializeClusterDiscovery(
 	case multiclusterproviders.ProviderMilo:
 		discoveryRestConfig, err := serverConfig.Discovery.DiscoveryRestConfig()
 		if err != nil {
-			return nil, nil, fmt.Errorf("unable to get discovery rest config: %w", err)
+			return nil, nil, nil, fmt.Errorf("unable to get discovery rest config: %w", err)
 		}
 
 		projectRestConfig, err := serverConfig.Discovery.ProjectRestConfig()
 		if err != nil {
-			return nil, nil, fmt.Errorf("unable to get project rest config: %w", err)
+			return nil, nil, nil, fmt.Errorf("unable to get project rest config: %w", err)
 		}
 
 		discoveryManager, err := manager.New(discoveryRestConfig, manager.Options{
@@ -330,7 +341,7 @@ func initializeClusterDiscovery(
 			Metrics: metricsserver.Options{BindAddress: "0"},
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("unable to set up discovery manager: %w", err)
+			return nil, nil, nil, fmt.Errorf("unable to set up discovery manager: %w", err)
 		}
 
 		provider, err = milomulticluster.New(discoveryManager, milomulticluster.Options{
@@ -343,16 +354,33 @@ func initializeClusterDiscovery(
 			ProjectRestConfig:        projectRestConfig,
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("unable to create milo project provider: %w", err)
+			return nil, nil, nil, fmt.Errorf("unable to create milo project provider: %w", err)
 		}
 
 		runnables = append(runnables, discoveryManager)
+		projects = projectChecker(discoveryManager.GetAPIReader(), serverConfig.Discovery.InternalServiceDiscovery)
 
 	default:
-		return nil, nil, fmt.Errorf("unsupported cluster discovery mode %s", serverConfig.Discovery.Mode)
+		return nil, nil, nil, fmt.Errorf("unsupported cluster discovery mode %s", serverConfig.Discovery.Mode)
 	}
 
-	return runnables, provider, nil
+	return runnables, provider, projects, nil
+}
+
+func projectChecker(reader client.Reader, internalServiceDiscovery bool) controller.ProjectChecker {
+	gvk := schema.GroupVersionKind{Group: "resourcemanager.miloapis.com", Version: "v1alpha1", Kind: "Project"}
+	if internalServiceDiscovery {
+		gvk = schema.GroupVersionKind{Group: "infrastructure.miloapis.com", Version: "v1alpha1", Kind: "ProjectControlPlane"}
+	}
+	return controller.ProjectCheckerFunc(func(ctx context.Context, clusterName multicluster.ClusterName) (bool, error) {
+		var project unstructured.Unstructured
+		project.SetGroupVersionKind(gvk)
+		err := reader.Get(ctx, client.ObjectKey{Name: string(clusterName)}, &project)
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return err == nil, err
+	})
 }
 
 func ignoreCanceled(err error) error {

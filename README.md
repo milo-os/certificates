@@ -61,7 +61,8 @@ control planes through Milo's multicluster-runtime provider and watches
 
 - a delegation anchor ConfigMap per project namespace and DNS01 name,
   `dt-<sha256(cluster/namespace-uid/name)[:32]>`, holding the random token.
-  It outlives the TLSCertificate;
+  It outlives the TLSCertificate and is swept once the namespace or project is
+  deleted;
 - an anchor ConfigMap recording delegation checks, a cert-manager
   `Certificate`, and the service's own copy of the issued key pair, all named
   `tc-<sha256(cluster/namespace/name/uid)[:32]>` in `--certificate-namespace`
@@ -90,7 +91,9 @@ within 15 minutes for DNS01 and an hour for HTTP01. Platform consumers read
 the service-side Secret, so they are unaffected.
 
 A finalizer removes the service-side resources when the `TLSCertificate` is
-deleted.
+deleted. A periodic sweep removes them once the `TLSCertificate` or its
+project has been confirmed gone for an hour. A project that is only
+disconnected is never swept.
 
 ## Flags
 

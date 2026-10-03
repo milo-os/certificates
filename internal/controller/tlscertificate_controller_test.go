@@ -3,6 +3,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -597,5 +598,128 @@ var _ = Describe("TLSCertificate reconciler", func() {
 		Expect(secret.Data[corev1.TLSCertKey]).To(Equal(crtB))
 		Expect(apierrors.IsNotFound(projectSecret(k8sClient, ns, "shared-tls")())).To(BeTrue())
 		Expect(get(tcA)(Default)).To(hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "Pending"))
+	})
+})
+
+var _ = Describe("OrphanSweeper", func() {
+	orphanCertificate := func(name, cluster string) *cmv1.Certificate {
+		cert := &cmv1.Certificate{
+			ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: name, Labels: map[string]string{
+				downstreamclient.UpstreamOwnerClusterNameLabel: "cluster-" + cluster,
+				downstreamclient.UpstreamOwnerGroupLabel:       certificatesv1alpha1.GroupVersion.Group,
+				downstreamclient.UpstreamOwnerKindLabel:        "TLSCertificate",
+				downstreamclient.UpstreamOwnerNameLabel:        "gone",
+				downstreamclient.UpstreamOwnerNamespaceLabel:   "nowhere",
+				UpstreamUIDLabel: "uid-" + name,
+			}},
+			Spec: cmv1.CertificateSpec{
+				SecretName: name,
+				DNSNames:   []string{name + ".example.com"},
+				IssuerRef:  cmmeta.ObjectReference{Name: http01Issuer, Kind: cmv1.ClusterIssuerKind},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cert)).To(Succeed())
+		Eventually(func(g Gomega) {
+			g.Expect(mcMgr.GetLocalManager().GetClient().Get(ctx, client.ObjectKeyFromObject(cert), &cmv1.Certificate{})).To(Succeed())
+		}).Should(Succeed())
+		return cert
+	}
+
+	exists := func(obj client.Object) bool {
+		return k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), obj) == nil
+	}
+
+	It("removes resources whose TLSCertificate is gone only after the grace period", func() {
+		orphan := orphanCertificate("orphan-deleted-tc", projectA)
+		now := time.Now()
+		sweeper := &OrphanSweeper{Manager: mcMgr, CertificateNamespace: serviceNamespace, GracePeriod: time.Hour, now: func() time.Time { return now }}
+
+		Expect(sweeper.Sweep(ctx)).To(Succeed())
+		now = now.Add(30 * time.Minute)
+		Expect(sweeper.Sweep(ctx)).To(Succeed())
+		Expect(exists(orphan)).To(BeTrue())
+
+		now = now.Add(31 * time.Minute)
+		Expect(sweeper.Sweep(ctx)).To(Succeed())
+		Expect(exists(orphan)).To(BeFalse())
+	})
+
+	It("never sweeps a project that is disconnected but still exists", func() {
+		cert := orphanCertificate("disconnected", "project-offline")
+		anchor := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: "disconnected", Labels: cert.Labels}}
+		Expect(k8sClient.Create(ctx, anchor)).To(Succeed())
+
+		projectExists := true
+		now := time.Now()
+		sweeper := &OrphanSweeper{
+			Manager:              mcMgr,
+			CertificateNamespace: serviceNamespace,
+			GracePeriod:          time.Hour,
+			now:                  func() time.Time { return now },
+			Projects: ProjectCheckerFunc(func(_ context.Context, name multicluster.ClusterName) (bool, error) {
+				return projectExists, nil
+			}),
+		}
+		for range 3 {
+			Expect(sweeper.Sweep(ctx)).To(Succeed())
+			now = now.Add(2 * time.Hour)
+		}
+		Expect(exists(cert)).To(BeTrue())
+		Expect(exists(anchor)).To(BeTrue())
+
+		By("sweeping once the project itself is deleted")
+		projectExists = false
+		Expect(sweeper.Sweep(ctx)).To(Succeed())
+		now = now.Add(2 * time.Hour)
+		Expect(sweeper.Sweep(ctx)).To(Succeed())
+		Expect(exists(cert)).To(BeFalse())
+		Expect(exists(anchor)).To(BeFalse())
+	})
+
+	It("keeps resources when the project cannot be checked", func() {
+		cert := orphanCertificate("unknown", "project-unknown")
+		now := time.Now()
+		sweeper := &OrphanSweeper{Manager: mcMgr, CertificateNamespace: serviceNamespace, GracePeriod: time.Hour, now: func() time.Time { return now }}
+		for range 3 {
+			Expect(sweeper.Sweep(ctx)).To(Succeed())
+			now = now.Add(2 * time.Hour)
+		}
+		Expect(exists(cert)).To(BeTrue())
+	})
+
+	It("keeps delegation anchors of live namespaces and sweeps those of deleted or recreated ones", func() {
+		liveName := newProjectNamespace(k8sClient)
+		var live corev1.Namespace
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: liveName}, &live)).To(Succeed())
+
+		anchor := func(name, namespace string, uid types.UID) *corev1.ConfigMap {
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: name, Labels: map[string]string{
+					DelegationAnchorLabel:                          "true",
+					downstreamclient.UpstreamOwnerClusterNameLabel: "cluster-" + projectA,
+					downstreamclient.UpstreamOwnerNamespaceLabel:   namespace,
+					NamespaceUIDLabel:                              string(uid),
+				}},
+				Data: map[string]string{delegationTokenKey: "token"},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(mcMgr.GetLocalManager().GetClient().Get(ctx, client.ObjectKeyFromObject(cm), &corev1.ConfigMap{})).To(Succeed())
+			}).Should(Succeed())
+			return cm
+		}
+		kept := anchor("dt-live", liveName, live.UID)
+		recreated := anchor("dt-recreated", liveName, "old-namespace-uid")
+		deleted := anchor("dt-deleted", "deleted-namespace", "gone-uid")
+
+		now := time.Now()
+		sweeper := &OrphanSweeper{Manager: mcMgr, CertificateNamespace: serviceNamespace, GracePeriod: time.Hour, now: func() time.Time { return now }}
+		Expect(sweeper.Sweep(ctx)).To(Succeed())
+		now = now.Add(2 * time.Hour)
+		Expect(sweeper.Sweep(ctx)).To(Succeed())
+
+		Expect(exists(kept)).To(BeTrue())
+		Expect(exists(recreated)).To(BeFalse())
+		Expect(exists(deleted)).To(BeFalse())
 	})
 })

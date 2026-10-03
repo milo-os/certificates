@@ -4,7 +4,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.4
-    discovery.miloapis.com/parent-contexts: Organization
+    discovery.miloapis.com/parent-contexts: Project
   name: tlscertificates.certificates.miloapis.com
 spec:
   group: certificates.miloapis.com
@@ -16,8 +16,17 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.phase
-      name: Phase
+    - jsonPath: .status.issuance
+      name: Issuance
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.secretRef.name
+      name: Secret
+      type: string
+    - jsonPath: .status.notAfter
+      name: NotAfter
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -26,9 +35,9 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          TLSCertificate is the Schema for the tlscertificates API.
-
-          Milo-specific: update or remove this annotation for your tlscertificate type
+          TLSCertificate requests a publicly trusted TLS certificate for a set of
+          hostnames and delivers it as a kubernetes.io/tls Secret in the same
+          namespace.
         properties:
           apiVersion:
             description: |-
@@ -50,17 +59,118 @@ spec:
           spec:
             description: TLSCertificateSpec defines the desired state of TLSCertificate.
             properties:
-              description:
-                description: Description is a human-readable description of this tlscertificate.
-                maxLength: 256
+              dnsNames:
+                description: |-
+                  DNSNames are the hostnames the certificate covers. Each name is a
+                  lowercase RFC 1123 hostname. A name may start with a single "*." label
+                  to cover exactly one additional label; "*" is not allowed anywhere else.
+
+                  The service does not verify that the project controls these names.
+                  Callers must create a TLSCertificate only for names whose ownership they
+                  have already verified. Names under the platform's own domains are
+                  rejected.
+                items:
+                  description: DNSName is a lowercase RFC 1123 hostname, optionally
+                    prefixed with "*.".
+                  maxLength: 253
+                  minLength: 1
+                  pattern: ^(\*\.)?[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)+$
+                  type: string
+                  x-kubernetes-validations:
+                  - message: IP addresses are not allowed
+                    rule: '!self.matches(''^[0-9.]+$'')'
+                  - message: '''*'' is only allowed as a leading ''*.'' label'
+                    rule: '!self.contains(''*'') || (self.startsWith(''*.'') && !self.substring(1).contains(''*''))'
+                  - message: a wildcard must cover a name with at least two labels
+                    rule: '!self.startsWith(''*.'') || self.substring(2).contains(''.'')'
+                maxItems: 8
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: set
+                x-kubernetes-validations:
+                - message: dnsNames is immutable
+                  rule: self == oldSelf
+              issuance:
+                default: Auto
+                description: |-
+                  Issuance selects how control of the names is validated. Auto resolves to
+                  DNS01 when any name is a wildcard and to HTTP01 otherwise. Immutable.
+                enum:
+                - Auto
+                - HTTP01
+                - DNS01
                 type: string
+                x-kubernetes-validations:
+                - message: issuance is immutable
+                  rule: self == oldSelf
+              secretName:
+                description: |-
+                  SecretName names the kubernetes.io/tls Secret written to the
+                  TLSCertificate's namespace. Defaults to "<metadata.name>-tls".
+                maxLength: 253
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                type: string
+            required:
+            - dnsNames
             type: object
+            x-kubernetes-validations:
+            - message: wildcard names require DNS01 or Auto issuance
+              rule: '!has(self.issuance) || self.issuance != ''HTTP01'' || !self.dnsNames.exists(n,
+                n.startsWith(''*.''))'
+            - message: secretName is immutable
+              rule: has(self.secretName) == has(oldSelf.secretName) && (!has(self.secretName)
+                || self.secretName == oldSelf.secretName)
           status:
             description: TLSCertificateStatus defines the observed state of TLSCertificate.
             properties:
+              challenges:
+                description: Challenges are the live ACME challenges the consumer
+                  may need to serve.
+                items:
+                  description: |-
+                    ACMEChallenge is a live ACME challenge for one name.
+
+                    For HTTP01, the consumer serves GET /.well-known/acme-challenge/<token>
+                    with the body <key> on dnsName. For DNS01 the service's issuer publishes
+                    the TXT record itself and the entry is informational.
+                  properties:
+                    dnsName:
+                      description: DNSName is the name being validated.
+                      type: string
+                    key:
+                      description: |-
+                        Key is the key authorization served for HTTP01, or the TXT value for
+                        DNS01.
+                      type: string
+                    state:
+                      description: State is the challenge's validation state.
+                      enum:
+                      - Pending
+                      - Valid
+                      - Invalid
+                      type: string
+                    token:
+                      description: Token is the challenge token.
+                      type: string
+                    type:
+                      description: Type is the challenge type.
+                      enum:
+                      - HTTP01
+                      - DNS01
+                      type: string
+                  required:
+                  - dnsName
+                  - key
+                  - state
+                  - token
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
               conditions:
-                description: Conditions represent the latest available observations
-                  of the tlscertificate's state.
+                description: Conditions are Accepted, DNSDelegationReady, Issuing
+                  and Ready.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -119,20 +229,109 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              delegationTarget:
+                description: |-
+                  DelegationTarget is the name the _acme-challenge record must CNAME to
+                  for DNS01 issuance, set only when the spec has exactly one DNS01 base
+                  name. status.requiredDNSRecords is authoritative and lists the target
+                  for every name. Targets are random, held by the service per project
+                  namespace and name, and stay the same when a TLSCertificate for the same
+                  name is recreated in the same namespace. They are never derived from the
+                  hostname.
+                type: string
+              issuance:
+                description: Issuance is the resolved issuance mode.
+                enum:
+                - HTTP01
+                - DNS01
+                type: string
+              notAfter:
+                description: NotAfter is when the current certificate expires.
+                format: date-time
+                type: string
+              notBefore:
+                description: NotBefore is when the current certificate becomes valid.
+                format: date-time
+                type: string
               observedGeneration:
-                description: ObservedGeneration is the most recent generation observed
-                  by the controller.
+                description: ObservedGeneration is the most recent generation the
+                  service acted on.
                 format: int64
                 type: integer
-              phase:
-                description: Phase represents the current lifecycle phase of the tlscertificate.
-                enum:
-                - Provisioning
-                - Ready
-                - Failed
+              renewalTime:
+                description: RenewalTime is when the service will next renew the certificate.
+                format: date-time
                 type: string
+              requiredDNSRecords:
+                description: |-
+                  RequiredDNSRecords are the records the name's owner must publish before
+                  issuance can complete. HTTP01 issuance emits none; routing the names to
+                  the consumer is the consumer's concern.
+                items:
+                  description: |-
+                    RequiredDNSRecord is a DNS record the name's owner must publish before
+                    issuance can complete.
+                  properties:
+                    content:
+                      description: Content is the record value.
+                      type: string
+                    name:
+                      description: Name is the fully qualified record name.
+                      type: string
+                    purpose:
+                      description: Purpose explains what the record is for.
+                      enum:
+                      - Routing
+                      - Certificate
+                      type: string
+                    type:
+                      description: Type is the DNS record type, such as CNAME.
+                      type: string
+                  required:
+                  - content
+                  - name
+                  - purpose
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              secretRef:
+                description: |-
+                  SecretRef names the kubernetes.io/tls Secret holding the issued
+                  certificate.
+                properties:
+                  name:
+                    description: Name is the Secret's name.
+                    type: string
+                required:
+                - name
+                type: object
+              serviceSecretRef:
+                description: |-
+                  ServiceSecretRef locates the service's own copy of the issued Secret on
+                  the cluster that runs the certificate service. It is kept in sync with
+                  every issuance and survives suspended renewal. Platform components that distribute the certificate
+                  read it from there with their own credentials rather than from the
+                  project copy, which project editors can change.
+                properties:
+                  name:
+                    description: Name is the Secret's name.
+                    type: string
+                  namespace:
+                    description: Namespace is the Secret's namespace on the service
+                      cluster.
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
             type: object
+        required:
+        - spec
         type: object
+        x-kubernetes-validations:
+        - message: metadata.name must be at most 63 characters
+          rule: size(self.metadata.name) <= 63
     served: true
     storage: true
     subresources:

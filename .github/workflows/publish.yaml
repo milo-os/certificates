@@ -33,6 +33,7 @@ jobs:
     secrets: inherit
 
   publish-kustomize-bundles:
+    needs: publish-container-image
     permissions:
       id-token: write
       contents: read

@@ -33,9 +33,8 @@ spec:
       openAPIV3Schema:
         description: |-
           TLSCertificate requests a publicly trusted TLS certificate for a set of
-          hostnames. The issued key pair stays on the service cluster, where platform
-          components read it through status.serviceSecretRef; it is never written to
-          the project.
+          hostnames. The issued key pair stays on the service cluster and is never
+          written to the project.
         properties:
           apiVersion:
             description: |-
@@ -282,25 +281,6 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
-              serviceSecretRef:
-                description: |-
-                  ServiceSecretRef locates the kubernetes.io/tls Secret holding the issued
-                  key pair on the cluster that runs the certificate service. It is kept in
-                  sync with every issuance and survives suspended renewal. The key pair is
-                  never written to the project: only platform components with credentials
-                  on the service cluster can read it.
-                properties:
-                  name:
-                    description: Name is the Secret's name.
-                    type: string
-                  namespace:
-                    description: Namespace is the Secret's namespace on the service
-                      cluster.
-                    type: string
-                required:
-                - name
-                - namespace
-                type: object
             type: object
         required:
         - spec

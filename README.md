@@ -47,11 +47,9 @@ spec:
   current certificate keeps being served while suspended.
 - `dnsNames` and `issuance` are immutable.
 - The key pair is never written to the project control plane, so no project
-  user can read the private key. Once issued, `Ready` turns `True` and
-  `status.serviceSecretRef`, `status.notBefore` and `status.notAfter` are set.
-  Platform components that distribute the certificate read the Secret on the
-  service cluster with their own credentials, and treat a new `notAfter` as
-  the signal to pick up a renewal.
+  user can read the private key, and the API does not name where it is held.
+  Once issued, `Ready` turns `True` and `status.notBefore` and
+  `status.notAfter` are set.
 - Conditions: `Accepted`, `DNSDelegationReady` (DNS01 only), `Issuing` and
   `Ready`.
 
@@ -67,10 +65,9 @@ control planes through Milo's multicluster-runtime provider and watches
   deleted;
 - an anchor ConfigMap recording delegation checks, a cert-manager
   `Certificate`, and the service's own copy of the issued key pair, all named
-  `tc-<sha256(cluster/namespace/name/uid)[:32]>` in `--certificate-namespace`
-  and labelled with the TLSCertificate's UID. cert-manager writes to
-  `<name>-issuing`; the service copies each valid issuance into `<name>`,
-  which nothing else owns, and `status.serviceSecretRef` points there. The
+  `tc-<sha256(uid)[:32]>` in `--certificate-namespace` and labelled with the
+  TLSCertificate's UID. cert-manager writes to `<name>-issuing`; the service
+  copies each valid issuance into `<name>`, which nothing else owns. The
   Certificate and anchor also carry the upstream cluster, namespace and name;
   the Secrets do not, so edge propagation policies never select them.
 
@@ -91,6 +88,23 @@ A finalizer removes the service-side resources when the `TLSCertificate` is
 deleted. A periodic sweep removes them once the `TLSCertificate` or its
 project has been confirmed gone for an hour. A project that is only
 disconnected is never swept.
+
+## Platform consumer contract
+
+This is an internal contract for platform components that serve the
+certificate, such as the network services operator, not part of the
+user-facing API. A component holding read access to Secrets in
+`--certificate-namespace` on the service cluster finds the key pair at:
+
+- namespace: `--certificate-namespace` (`certificates-system` by default);
+- name: `StoredSecretName(uid)` from `go.miloapis.com/certificates/api/v1alpha1`,
+  which is `tc-` followed by the first 32 hex characters of the SHA-256 of the
+  `TLSCertificate`'s UID.
+
+The Secret is `kubernetes.io/tls` and carries the label
+`certificates.miloapis.com/upstream-uid: <uid>`; check it before use. Wait for
+`Ready=True`, and treat a change in `status.notAfter` as the signal that a
+renewal has replaced the key pair.
 
 ## Flags
 

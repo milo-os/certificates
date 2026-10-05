@@ -125,16 +125,6 @@ type TLSCertificateSpec struct {
 // +kubebuilder:validation:XValidation:rule="!self.startsWith('*.') || self.substring(2).contains('.')",message="a wildcard must cover a name with at least two labels"
 type DNSName string
 
-// ServiceSecretReference locates the issued Secret on the cluster that runs
-// the certificate service.
-type ServiceSecretReference struct {
-	// Namespace is the Secret's namespace on the service cluster.
-	Namespace string `json:"namespace"`
-
-	// Name is the Secret's name.
-	Name string `json:"name"`
-}
-
 // RequiredDNSRecord is a DNS record the name's owner must publish before
 // issuance can complete.
 type RequiredDNSRecord struct {
@@ -180,15 +170,6 @@ type TLSCertificateStatus struct {
 	//
 	// +optional
 	Issuance ChallengeType `json:"issuance,omitempty"`
-
-	// ServiceSecretRef locates the kubernetes.io/tls Secret holding the issued
-	// key pair on the cluster that runs the certificate service. It is kept in
-	// sync with every issuance and survives suspended renewal. The key pair is
-	// never written to the project: only platform components with credentials
-	// on the service cluster can read it.
-	//
-	// +optional
-	ServiceSecretRef *ServiceSecretReference `json:"serviceSecretRef,omitempty"`
 
 	// DelegationTarget is the name the _acme-challenge record must CNAME to
 	// for DNS01 issuance, set only when the spec has exactly one DNS01 base
@@ -244,9 +225,8 @@ type TLSCertificateStatus struct {
 }
 
 // TLSCertificate requests a publicly trusted TLS certificate for a set of
-// hostnames. The issued key pair stays on the service cluster, where platform
-// components read it through status.serviceSecretRef; it is never written to
-// the project.
+// hostnames. The issued key pair stays on the service cluster and is never
+// written to the project.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

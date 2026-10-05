@@ -4,10 +4,8 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -116,7 +114,7 @@ func (r *TLSCertificateReconciler) Reconcile(ctx context.Context, req mcreconcil
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	certName := serviceCertificateName(req.ClusterName, tc.Namespace, tc.Name, tc.UID)
+	certName := certificatesv1alpha1.StoredSecretName(tc.UID)
 
 	if !tc.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, r.finalize(ctx, cl, req.ClusterName, &tc, certName)
@@ -570,7 +568,6 @@ func (r *TLSCertificateReconciler) syncIssued(
 
 	notBefore, notAfter := metav1.NewTime(leaf.NotBefore), metav1.NewTime(leaf.NotAfter)
 	tc.Status.NotBefore, tc.Status.NotAfter = &notBefore, &notAfter
-	tc.Status.ServiceSecretRef = &certificatesv1alpha1.ServiceSecretReference{Namespace: r.CertificateNamespace, Name: certName}
 
 	if !time.Now().Before(leaf.NotAfter) {
 		r.setCondition(tc, certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "Expired", "The certificate has expired.")
@@ -679,11 +676,6 @@ func (r *TLSCertificateReconciler) resyncInterval() time.Duration {
 		return r.ResyncInterval
 	}
 	return defaultResyncInterval
-}
-
-func serviceCertificateName(clusterName multicluster.ClusterName, namespace, name string, uid types.UID) string {
-	sum := sha256.Sum256([]byte(string(clusterName) + "/" + namespace + "/" + name + "/" + string(uid)))
-	return "tc-" + hex.EncodeToString(sum[:16])
 }
 
 // issuingSecretName names the Secret cert-manager writes for certName. The

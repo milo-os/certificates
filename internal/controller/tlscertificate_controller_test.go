@@ -117,9 +117,19 @@ func serviceCertificateExists(certName string) func() bool {
 	}
 }
 
-func projectSecret(c client.Client, namespace, name string) func() error {
-	return func() error {
-		return c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &corev1.Secret{})
+func projectSecrets(c client.Client, namespace string) func(Gomega) []corev1.Secret {
+	return func(g Gomega) []corev1.Secret {
+		var secrets corev1.SecretList
+		g.Expect(c.List(ctx, &secrets, client.InNamespace(namespace))).To(Succeed())
+		return secrets.Items
+	}
+}
+
+func storedCertificate(certName string) func(Gomega) []byte {
+	return func(g Gomega) []byte {
+		var stored corev1.Secret
+		g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: certName}, &stored)).To(Succeed())
+		return stored.Data[corev1.TLSCertKey]
 	}
 }
 
@@ -172,7 +182,7 @@ var _ = Describe("TLSCertificate reconciler", func() {
 	var ns string
 	BeforeEach(func() { ns = newProjectNamespace(k8sClient) })
 
-	It("accepts an HTTP01 certificate, mirrors challenges, copies the secret and cleans up", func() {
+	It("accepts an HTTP01 certificate, mirrors challenges, stores the issuance service-side and cleans up", func() {
 		tc := newTLSCertificate(ns, "web", certificatesv1alpha1.IssuanceModeAuto, "app.example.com")
 		Expect(k8sClient.Create(ctx, tc)).To(Succeed())
 		certName := certNameFor(projectA, tc)
@@ -182,7 +192,6 @@ var _ = Describe("TLSCertificate reconciler", func() {
 			hasCondition(certificatesv1alpha1.ConditionAccepted, metav1.ConditionTrue, "Accepted"),
 			hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "Pending"),
 			HaveField("Status.Issuance", certificatesv1alpha1.ChallengeTypeHTTP01),
-			HaveField("Status.SecretRef.Name", "web-tls"),
 			HaveField("Status.RequiredDNSRecords", BeEmpty()),
 			HaveField("Finalizers", ContainElement(tlsCertificateFinalizer)),
 		))
@@ -264,24 +273,20 @@ var _ = Describe("TLSCertificate reconciler", func() {
 			HaveField("Status.Challenges", ConsistOf(HaveField("State", certificatesv1alpha1.ChallengeStateInvalid))),
 		))
 
-		By("copying the issued secret into the project")
+		By("storing the issued key pair service-side")
 		crt := issueSecret(certName, tc.UID, "app.example.com")
 		Eventually(get(tc)).Should(And(
 			hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionTrue, "Issued"),
 			HaveField("Status.NotAfter", Not(BeNil())),
 			HaveField("Status.ServiceSecretRef", Equal(&certificatesv1alpha1.ServiceSecretReference{Namespace: serviceNamespace, Name: certName})),
 		))
-		var secret corev1.Secret
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "web-tls"}, &secret)).To(Succeed())
-		Expect(secret.Type).To(Equal(corev1.SecretTypeTLS))
-		Expect(secret.Data[corev1.TLSCertKey]).To(Equal(crt))
 		var stored corev1.Secret
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: certName}, &stored)).To(Succeed())
+		Expect(stored.Type).To(Equal(corev1.SecretTypeTLS))
 		Expect(stored.Data[corev1.TLSCertKey]).To(Equal(crt))
 		Expect(stored.OwnerReferences).To(BeEmpty())
-		Expect(metav1.IsControlledBy(&secret, get(tc)(Default))).To(BeTrue())
 
-		By("deleting service-side resources on deletion and leaving the project secret to garbage collection")
+		By("deleting service-side resources on deletion")
 		Expect(k8sClient.Delete(ctx, tc)).To(Succeed())
 		Eventually(func() bool {
 			return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(tc), &certificatesv1alpha1.TLSCertificate{}))
@@ -290,6 +295,23 @@ var _ = Describe("TLSCertificate reconciler", func() {
 			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: certName}, obj))).To(BeTrue())
 		}
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: issuingSecretName(certName)}, &corev1.Secret{}))).To(BeTrue())
+	})
+
+	It("reports Ready with the service-side reference and expiry without writing a Secret to the project", func() {
+		Expect(projectSecrets(k8sClient, ns)(Default)).To(BeEmpty())
+		tc := newTLSCertificate(ns, "private", certificatesv1alpha1.IssuanceModeAuto, "private.example.com")
+		Expect(k8sClient.Create(ctx, tc)).To(Succeed())
+		certName := certNameFor(projectA, tc)
+		Eventually(serviceCertificateExists(certName)).Should(BeTrue())
+
+		issueSecret(certName, tc.UID, "private.example.com")
+		Eventually(get(tc)).Should(And(
+			hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionTrue, "Issued"),
+			HaveField("Status.ServiceSecretRef", Equal(&certificatesv1alpha1.ServiceSecretReference{Namespace: serviceNamespace, Name: certName})),
+			HaveField("Status.NotBefore", Not(BeNil())),
+			HaveField("Status.NotAfter", Not(BeNil())),
+		))
+		Consistently(projectSecrets(k8sClient, ns), 2*time.Second).Should(BeEmpty())
 	})
 
 	It("gates DNS01 issuance on a project-bound delegation target and suspends renewal when delegation is lost", func() {
@@ -431,7 +453,7 @@ var _ = Describe("TLSCertificate reconciler", func() {
 		Eventually(get(recreated)).Should(HaveField("Status.DelegationTarget", And(Not(BeEmpty()), Not(Equal(before)))))
 	})
 
-	It("replaces the stored copy only with a newer, matching issuance and carries renewals to the project", func() {
+	It("replaces the stored copy only with a newer, matching issuance and reports each new expiry", func() {
 		tc := newTLSCertificate(ns, "rotate", certificatesv1alpha1.IssuanceModeAuto, "rotate.example.com")
 		Expect(k8sClient.Create(ctx, tc)).To(Succeed())
 		certName := certNameFor(projectA, tc)
@@ -458,43 +480,47 @@ var _ = Describe("TLSCertificate reconciler", func() {
 				return k8sClient.Update(ctx, &current)
 			}).Should(Succeed())
 		}
-		projectCopy := func(g Gomega) []byte {
-			var secret corev1.Secret
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "rotate-tls"}, &secret)).To(Succeed())
-			return secret.Data[corev1.TLSCertKey]
+		storedCopy := storedCertificate(certName)
+		notAfter := func(g Gomega) time.Time {
+			got := get(tc)(g)
+			g.Expect(got.Status.NotAfter).NotTo(BeNil())
+			return got.Status.NotAfter.Time
 		}
-		now := time.Now()
+		now := time.Now().Truncate(time.Second)
 
-		By("copying the first issuance into the project")
+		By("storing the first issuance")
 		first, firstKey := selfSignedPEMAt(now.Add(-48*time.Hour), now.Add(60*24*time.Hour), "rotate.example.com")
 		write(first, firstKey)
-		Eventually(projectCopy).Should(Equal(first))
+		Eventually(storedCopy).Should(Equal(first))
+		Eventually(notAfter).Should(BeTemporally("==", now.Add(60*24*time.Hour)))
 
-		By("carrying a renewal to the project copy")
+		By("replacing it with a renewal and reporting the new expiry")
 		renewed, renewedKey := selfSignedPEMAt(now.Add(-24*time.Hour), now.Add(90*24*time.Hour), "rotate.example.com")
 		write(renewed, renewedKey)
-		Eventually(projectCopy).Should(Equal(renewed))
+		Eventually(storedCopy).Should(Equal(renewed))
+		Eventually(notAfter).Should(BeTemporally("==", now.Add(90*24*time.Hour)))
 
 		By("adopting an emergency re-key with a shorter lifetime")
 		rekeyed, rekeyedKey := selfSignedPEMAt(now.Add(-time.Hour), now.Add(7*24*time.Hour), "rotate.example.com")
 		write(rekeyed, rekeyedKey)
-		Eventually(projectCopy).Should(Equal(rekeyed))
+		Eventually(storedCopy).Should(Equal(rekeyed))
+		Eventually(notAfter).Should(BeTemporally("==", now.Add(7*24*time.Hour)))
 
 		By("refusing an older issuance")
 		older, olderKey := selfSignedPEMAt(now.Add(-72*time.Hour), now.Add(120*24*time.Hour), "rotate.example.com")
 		write(older, olderKey)
-		Consistently(projectCopy, time.Second).Should(Equal(rekeyed))
+		Consistently(storedCopy, time.Second).Should(Equal(rekeyed))
 
 		By("refusing a certificate whose key does not match")
 		mismatched, _ := selfSignedPEMAt(now.Add(-time.Minute), now.Add(90*24*time.Hour), "rotate.example.com")
 		_, otherKey := selfSignedPEMAt(now.Add(-time.Minute), now.Add(90*24*time.Hour), "rotate.example.com")
 		write(mismatched, otherKey)
-		Consistently(projectCopy, time.Second).Should(Equal(rekeyed))
+		Consistently(storedCopy, time.Second).Should(Equal(rekeyed))
 
 		By("refusing a certificate with an extra name")
 		extra, extraKey := selfSignedPEMAt(now.Add(-time.Minute), now.Add(90*24*time.Hour), "rotate.example.com", "extra.attacker.example")
 		write(extra, extraKey)
-		Consistently(projectCopy, time.Second).Should(Equal(rekeyed))
+		Consistently(storedCopy, time.Second).Should(Equal(rekeyed))
 
 		var stored corev1.Secret
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: certName}, &stored)).To(Succeed())
@@ -526,7 +552,7 @@ var _ = Describe("TLSCertificate reconciler", func() {
 		Eventually(serviceCertificateExists(certName)).Should(BeFalse())
 	})
 
-	It("never copies an issued secret bound to another TLSCertificate or missing requested names", func() {
+	It("never stores an issued secret bound to another TLSCertificate or missing requested names", func() {
 		tc := newTLSCertificate(ns, "reuse", certificatesv1alpha1.IssuanceModeAuto, "reuse.example.com")
 		Expect(k8sClient.Create(ctx, tc)).To(Succeed())
 		certName := certNameFor(projectA, tc)
@@ -535,41 +561,13 @@ var _ = Describe("TLSCertificate reconciler", func() {
 		By("ignoring a secret labelled for a previous TLSCertificate")
 		issueSecret(certName, types.UID("previous-tenant"), "reuse.example.com")
 		Consistently(get(tc), time.Second).Should(hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "Pending"))
-		Expect(apierrors.IsNotFound(projectSecret(k8sClient, ns, "reuse-tls")())).To(BeTrue())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: certName}, &corev1.Secret{}))).To(BeTrue())
 
 		By("ignoring a certificate that does not cover the requested names")
 		Expect(k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: issuingSecretName(certName)}})).To(Succeed())
 		issueSecret(certName, tc.UID, "other.example.com")
 		Consistently(get(tc), time.Second).Should(hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "Pending"))
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: certName}, &corev1.Secret{}))).To(BeTrue())
-		Expect(apierrors.IsNotFound(projectSecret(k8sClient, ns, "reuse-tls")())).To(BeTrue())
-	})
-
-	It("refuses to take over a project Secret it does not own", func() {
-		original := map[string][]byte{"password": []byte("hunter2")}
-		Expect(k8sClient.Create(ctx, &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "db-credentials"},
-			Data:       original,
-		})).To(Succeed())
-
-		tc := newTLSCertificate(ns, "takeover", certificatesv1alpha1.IssuanceModeAuto, "takeover.example.com")
-		tc.Spec.SecretName = "db-credentials"
-		Expect(k8sClient.Create(ctx, tc)).To(Succeed())
-		certName := certNameFor(projectA, tc)
-		Eventually(serviceCertificateExists(certName)).Should(BeTrue())
-		issueSecret(certName, tc.UID, "takeover.example.com")
-
-		Eventually(get(tc)).Should(hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "SecretConflict"))
-		var secret corev1.Secret
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "db-credentials"}, &secret)).To(Succeed())
-		Expect(secret.Data).To(Equal(original))
-		Expect(secret.OwnerReferences).To(BeEmpty())
-
-		Expect(k8sClient.Delete(ctx, tc)).To(Succeed())
-		Eventually(func() bool {
-			return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(tc), &certificatesv1alpha1.TLSCertificate{}))
-		}).Should(BeTrue())
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "db-credentials"}, &secret)).To(Succeed())
 	})
 
 	It("keeps the same namespace and name in two projects apart", func() {
@@ -592,12 +590,17 @@ var _ = Describe("TLSCertificate reconciler", func() {
 		Expect(certB.Labels).To(HaveKeyWithValue(downstreamclient.UpstreamOwnerClusterNameLabel, "cluster-"+projectB))
 
 		crtB := issueSecret(nameB, tcB.UID, "b.example.com")
-		Eventually(getFrom(k8sClientB, tcB)).Should(hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionTrue, "Issued"))
-		var secret corev1.Secret
-		Expect(k8sClientB.Get(ctx, types.NamespacedName{Namespace: ns, Name: "shared-tls"}, &secret)).To(Succeed())
-		Expect(secret.Data[corev1.TLSCertKey]).To(Equal(crtB))
-		Expect(apierrors.IsNotFound(projectSecret(k8sClient, ns, "shared-tls")())).To(BeTrue())
-		Expect(get(tcA)(Default)).To(hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "Pending"))
+		Eventually(getFrom(k8sClientB, tcB)).Should(And(
+			hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionTrue, "Issued"),
+			HaveField("Status.ServiceSecretRef", Equal(&certificatesv1alpha1.ServiceSecretReference{Namespace: serviceNamespace, Name: nameB})),
+		))
+		Expect(storedCertificate(nameB)(Default)).To(Equal(crtB))
+		Expect(projectSecrets(k8sClientB, ns)(Default)).To(BeEmpty())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: nameA}, &corev1.Secret{}))).To(BeTrue())
+		Expect(get(tcA)(Default)).To(And(
+			hasCondition(certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "Pending"),
+			HaveField("Status.ServiceSecretRef", BeNil()),
+		))
 	})
 })
 

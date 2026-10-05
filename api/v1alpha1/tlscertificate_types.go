@@ -81,15 +81,14 @@ const (
 	// ConditionIssuing reports whether an ACME order is in flight.
 	ConditionIssuing = "Issuing"
 
-	// ConditionReady reports whether an unexpired certificate Secret exists in
-	// the project.
+	// ConditionReady reports whether an unexpired certificate covering every
+	// requested name has been issued and stored on the service side.
 	ConditionReady = "Ready"
 )
 
 // TLSCertificateSpec defines the desired state of TLSCertificate.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.issuance) || self.issuance != 'HTTP01' || !self.dnsNames.exists(n, n.startsWith('*.'))",message="wildcard names require DNS01 or Auto issuance"
-// +kubebuilder:validation:XValidation:rule="has(self.secretName) == has(oldSelf.secretName) && (!has(self.secretName) || self.secretName == oldSelf.secretName)",message="secretName is immutable"
 type TLSCertificateSpec struct {
 	// DNSNames are the hostnames the certificate covers. Each name is a
 	// lowercase RFC 1123 hostname. A name may start with a single "*." label
@@ -114,15 +113,6 @@ type TLSCertificateSpec struct {
 	// +kubebuilder:default=Auto
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="issuance is immutable"
 	Issuance IssuanceMode `json:"issuance,omitempty"`
-
-	// SecretName names the kubernetes.io/tls Secret written to the
-	// TLSCertificate's namespace. Defaults to "<metadata.name>-tls".
-	//
-	// +optional
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
-	SecretName string `json:"secretName,omitempty"`
 }
 
 // DNSName is a lowercase RFC 1123 hostname, optionally prefixed with "*.".
@@ -134,12 +124,6 @@ type TLSCertificateSpec struct {
 // +kubebuilder:validation:XValidation:rule="!self.contains('*') || (self.startsWith('*.') && !self.substring(1).contains('*'))",message="'*' is only allowed as a leading '*.' label"
 // +kubebuilder:validation:XValidation:rule="!self.startsWith('*.') || self.substring(2).contains('.')",message="a wildcard must cover a name with at least two labels"
 type DNSName string
-
-// SecretReference names a Secret in the TLSCertificate's namespace.
-type SecretReference struct {
-	// Name is the Secret's name.
-	Name string `json:"name"`
-}
 
 // ServiceSecretReference locates the issued Secret on the cluster that runs
 // the certificate service.
@@ -197,17 +181,11 @@ type TLSCertificateStatus struct {
 	// +optional
 	Issuance ChallengeType `json:"issuance,omitempty"`
 
-	// SecretRef names the kubernetes.io/tls Secret holding the issued
-	// certificate.
-	//
-	// +optional
-	SecretRef *SecretReference `json:"secretRef,omitempty"`
-
-	// ServiceSecretRef locates the service's own copy of the issued Secret on
-	// the cluster that runs the certificate service. It is kept in sync with
-	// every issuance and survives suspended renewal. Platform components that distribute the certificate
-	// read it from there with their own credentials rather than from the
-	// project copy, which project editors can change.
+	// ServiceSecretRef locates the kubernetes.io/tls Secret holding the issued
+	// key pair on the cluster that runs the certificate service. It is kept in
+	// sync with every issuance and survives suspended renewal. The key pair is
+	// never written to the project: only platform components with credentials
+	// on the service cluster can read it.
 	//
 	// +optional
 	ServiceSecretRef *ServiceSecretReference `json:"serviceSecretRef,omitempty"`
@@ -266,15 +244,15 @@ type TLSCertificateStatus struct {
 }
 
 // TLSCertificate requests a publicly trusted TLS certificate for a set of
-// hostnames and delivers it as a kubernetes.io/tls Secret in the same
-// namespace.
+// hostnames. The issued key pair stays on the service cluster, where platform
+// components read it through status.serviceSecretRef; it is never written to
+// the project.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be at most 63 characters"
 // +kubebuilder:printcolumn:name="Issuance",type=string,JSONPath=`.status.issuance`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
-// +kubebuilder:printcolumn:name="Secret",type=string,JSONPath=`.status.secretRef.name`
 // +kubebuilder:printcolumn:name="NotAfter",type=string,JSONPath=`.status.notAfter`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:metadata:annotations="discovery.miloapis.com/parent-contexts=Project"

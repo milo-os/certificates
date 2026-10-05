@@ -1,8 +1,8 @@
 # certificates
 
 Certificates, built in. The certificate service issues publicly trusted TLS
-certificates for hostnames in Milo project control planes and delivers them as
-`kubernetes.io/tls` Secrets beside the request.
+certificates for hostnames in Milo project control planes. The issued key pair
+stays on the service cluster; projects never receive it.
 
 A project asks for a certificate with a `TLSCertificate`:
 
@@ -45,11 +45,13 @@ spec:
   `certificates_dns01_delegation_unconfirmed_seconds` metric reports how long
   each certificate has gone unconfirmed; alert on it passing an hour. The
   current certificate keeps being served while suspended.
-- `dnsNames`, `issuance` and `secretName` are immutable.
-- Once issued, the certificate is written to the Secret named in
-  `status.secretRef` and owned by the `TLSCertificate`. Platform components
-  that distribute the certificate read it from `status.serviceSecretRef`, the
-  copy on the service cluster.
+- `dnsNames` and `issuance` are immutable.
+- The key pair is never written to the project control plane, so no project
+  user can read the private key. Once issued, `Ready` turns `True` and
+  `status.serviceSecretRef`, `status.notBefore` and `status.notAfter` are set.
+  Platform components that distribute the certificate read the Secret on the
+  service cluster with their own credentials, and treat a new `notAfter` as
+  the signal to pick up a renewal.
 - Conditions: `Accepted`, `DNSDelegationReady` (DNS01 only), `Issuing` and
   `Ready`.
 
@@ -70,11 +72,10 @@ control planes through Milo's multicluster-runtime provider and watches
   `<name>-issuing`; the service copies each valid issuance into `<name>`,
   which nothing else owns, and `status.serviceSecretRef` points there. The
   Certificate and anchor also carry the upstream cluster, namespace and name;
-  the Secrets do not, so edge propagation policies never select them;
-- the project Secret, written with server-side apply without forcing
-  ownership, so a Secret the service did not create is never overwritten. It
-  carries a controller reference to the `TLSCertificate` and is removed by
-  garbage collection.
+  the Secrets do not, so edge propagation policies never select them.
+
+In the project control plane it writes only the `TLSCertificate`'s status and
+finalizer.
 
 An issuance is copied only when its UID label matches the `TLSCertificate`,
 its names equal `spec.dnsNames` exactly, its key matches its certificate, and
@@ -85,10 +86,6 @@ The service deletes the cert-manager `Certificate` whenever the spec is no
 longer accepted or DNS01 renewal is suspended, so cert-manager cannot renew
 it. The service's copy of the key pair is unaffected, so cert-manager may run
 with or without `--enable-certificate-owner-ref`.
-
-A project Secret deleted by hand is restored on the next periodic reconcile:
-within 15 minutes for DNS01 and an hour for HTTP01. Platform consumers read
-the service-side Secret, so they are unaffected.
 
 A finalizer removes the service-side resources when the `TLSCertificate` is
 deleted. A periodic sweep removes them once the `TLSCertificate` or its
@@ -150,11 +147,10 @@ mode, the service needs:
 - `tlscertificates/status`: update, patch
 - `tlscertificates/finalizers`: update
 - `namespaces`: get, list, watch
-- `secrets`: create, patch (server-side apply needs both to create a Secret)
 
-It never reads or deletes project Secrets. Each project Secret carries a
-controller reference to its `TLSCertificate`, so project control planes must
-run garbage collection to remove it with the `TLSCertificate`.
+It has no access to Secrets in project control planes and never writes one.
+The key pair lives only in the certificate namespace on the service cluster,
+and the finalizer and the periodic sweep remove it with the `TLSCertificate`.
 
 ## Prerequisites
 

@@ -5,12 +5,21 @@ package cmd
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"reflect"
 	"testing"
 
+	acmev1 "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	cmv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
+
+	"go.miloapis.com/certificates/internal/config"
 )
 
 func TestDefaultFlagsRequireServiceIdentitiesWithWebhook(t *testing.T) {
@@ -111,4 +120,84 @@ func TestProjectChecker(t *testing.T) {
 	if _, err := projectChecker(reader, true).ProjectExists(context.Background(), "p"); err != nil || reader.gvk.Kind != "ProjectControlPlane" {
 		t.Fatalf("internal discovery looked up %v (err %v)", reader.gvk, err)
 	}
+}
+
+func TestCertManagerClusterUnsetKeepsLocalCluster(t *testing.T) {
+	cl, err := newCertManagerCluster(context.Background(), "", "certificates-system")
+	if err != nil || cl != nil {
+		t.Fatalf("expected no separate cluster without a kubeconfig, got %v (err %v)", cl, err)
+	}
+
+	objects := localCacheObjects("certificates-system", false)
+	for _, obj := range []client.Object{&corev1.ConfigMap{}, &corev1.Secret{}, &cmv1.Certificate{}, &acmev1.Order{}, &acmev1.Challenge{}} {
+		if !cachesType(objects, obj, "certificates-system") {
+			t.Errorf("local cache must scope %T to the certificate namespace", obj)
+		}
+	}
+}
+
+func TestCertManagerClusterSetMovesIssuanceOffTheLocalCache(t *testing.T) {
+	objects := localCacheObjects("certificates-system", true)
+	if !cachesType(objects, &corev1.ConfigMap{}, "certificates-system") {
+		t.Error("delegation anchors must stay in the local cache")
+	}
+	for _, obj := range []client.Object{&corev1.Secret{}, &cmv1.Certificate{}, &acmev1.Order{}, &acmev1.Challenge{}} {
+		if cachesType(objects, obj, "") {
+			t.Errorf("local cache must not watch %T when cert-manager runs elsewhere", obj)
+		}
+	}
+
+	if _, err := newCertManagerCluster(context.Background(), filepath.Join(t.TempDir(), "missing"), "certificates-system"); err == nil {
+		t.Fatal("expected an unreadable cert-manager kubeconfig to fail startup")
+	}
+}
+
+func TestCertManagerKubeconfigPathDecodes(t *testing.T) {
+	data := []byte("apiVersion: apiserver.config.miloapis.com/v1alpha1\nkind: TLSCertificateOperator\ncertManagerKubeconfigPath: /etc/karmada/kubeconfig\n")
+	var cfg config.TLSCertificateOperator
+	if err := runtime.DecodeInto(codecs.UniversalDecoder(), data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CertManagerKubeconfigPath != "/etc/karmada/kubeconfig" {
+		t.Fatalf("got %q", cfg.CertManagerKubeconfigPath)
+	}
+}
+
+func TestRequireNamespace(t *testing.T) {
+	gr := schema.GroupResource{Resource: "namespaces"}
+	tests := []struct {
+		name    string
+		err     error
+		wantErr bool
+	}{
+		{name: "present"},
+		{name: "missing", err: apierrors.NewNotFound(gr, "certificates-system"), wantErr: true},
+		{name: "forbidden", err: apierrors.NewForbidden(gr, "certificates-system", errors.New("denied")), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &stubReader{err: tt.err}
+			err := requireNamespace(context.Background(), reader, "certificates-system")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("got err=%v, wantErr=%v", err, tt.wantErr)
+			}
+			if reader.got != (client.ObjectKey{Name: "certificates-system"}) {
+				t.Fatalf("looked up %v", reader.got)
+			}
+		})
+	}
+}
+
+func cachesType(objects map[client.Object]cache.ByObject, want client.Object, namespace string) bool {
+	for obj, by := range objects {
+		if reflect.TypeOf(obj) != reflect.TypeOf(want) {
+			continue
+		}
+		if namespace == "" {
+			return true
+		}
+		_, ok := by.Namespaces[namespace]
+		return ok && len(by.Namespaces) == 1
+	}
+	return false
 }

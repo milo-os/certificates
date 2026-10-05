@@ -44,6 +44,7 @@ const (
 	delegationZone   = "acme-dns.example.net"
 	projectA         = "project-a"
 	projectB         = "project-b"
+	projectC         = "project-c"
 )
 
 var (
@@ -57,6 +58,13 @@ var (
 	scheme     = runtime.NewScheme()
 	resolver   = &fakeResolver{records: map[string]string{}, transient: map[string]bool{}}
 	mcMgr      mcmanager.Manager
+
+	testEnvC         *envtest.Environment
+	testEnvCM        *envtest.Environment
+	k8sClientC       client.Client
+	certManagerCl    client.Client
+	certManagerMgr   mcmanager.Manager
+	certManagerSetup cluster.Cluster
 )
 
 type fakeResolver struct {
@@ -180,11 +188,79 @@ var _ = BeforeSuite(func() {
 		defer GinkgoRecover()
 		Expect(mcMgr.Start(ctx)).To(Succeed())
 	}()
+
+	startSeparateCertManager()
 })
+
+func startSeparateCertManager() {
+	testEnvC = &envtest.Environment{
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "base", "crd", "bases")},
+		ErrorIfCRDPathMissing: true,
+	}
+	cfgC, err := testEnvC.Start()
+	Expect(err).NotTo(HaveOccurred())
+	k8sClientC, err = client.New(cfgC, client.Options{Scheme: scheme})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(k8sClientC.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: serviceNamespace}})).To(Succeed())
+
+	testEnvCM = &envtest.Environment{
+		CRDDirectoryPaths:     []string{filepath.Join("testdata", "crds")},
+		ErrorIfCRDPathMissing: true,
+	}
+	cfgCM, err := testEnvCM.Start()
+	Expect(err).NotTo(HaveOccurred())
+	certManagerCl, err = client.New(cfgCM, client.Options{Scheme: scheme})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(certManagerCl.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: serviceNamespace}})).To(Succeed())
+
+	certManagerSetup, err = cluster.New(cfgCM, func(o *cluster.Options) {
+		o.Scheme = scheme
+		o.Cache.DefaultNamespaces = map[string]cache.Config{serviceNamespace: {}}
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	provider := mcclusters.New()
+	projectCluster, err := cluster.New(cfgC, func(o *cluster.Options) { o.Scheme = scheme })
+	Expect(err).NotTo(HaveOccurred())
+	Expect(provider.Add(ctx, multicluster.ClusterName(projectC), projectCluster)).To(Succeed())
+
+	certManagerMgr, err = mcmanager.New(cfgC, provider, ctrl.Options{
+		Scheme:     scheme,
+		Metrics:    metricsserver.Options{BindAddress: "0"},
+		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
+			&corev1.ConfigMap{}: {Namespaces: map[string]cache.Config{serviceNamespace: {}}},
+		}},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(certManagerMgr.GetLocalManager().Add(certManagerSetup)).To(Succeed())
+
+	Expect((&TLSCertificateReconciler{
+		CertificateNamespace:      serviceNamespace,
+		HTTP01ClusterIssuer:       http01Issuer,
+		DNS01ClusterIssuer:        dns01Issuer,
+		DNS01DelegationZone:       delegationZone,
+		DeniedDomainSuffixes:      []string{"datumproxy.net"},
+		MaxConcurrentReconciles:   2,
+		Resolver:                  resolver,
+		DelegationRecheckInterval: 200 * time.Millisecond,
+		DelegatedRecheckInterval:  200 * time.Millisecond,
+		SuspendAfterFailures:      3,
+		SuspendAfter:              2 * time.Second,
+		CertManager:               certManagerSetup,
+		skipNameValidation:        true,
+	}).SetupWithManager(certManagerMgr)).To(Succeed())
+
+	go func() {
+		defer GinkgoRecover()
+		Expect(certManagerMgr.Start(ctx)).To(Succeed())
+	}()
+}
 
 var _ = AfterSuite(func() {
 	cancel()
 	By("tearing down the test environment")
 	Expect(testEnv.Stop()).To(Succeed())
 	Expect(testEnvB.Stop()).To(Succeed())
+	Expect(testEnvC.Stop()).To(Succeed())
+	Expect(testEnvCM.Stop()).To(Succeed())
 })

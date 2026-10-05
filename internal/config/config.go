@@ -37,11 +37,14 @@ type TLSCertificateOperator struct {
 	// is required.
 	WebhookServer *WebhookServerConfig `json:"webhookServer,omitempty"`
 
-	// KubeconfigPath is the path to the kubeconfig file for the cluster that
-	// runs cert-manager and holds the service-side Certificates. When empty, the
+	// KubeconfigPath is the path to the kubeconfig file for the local cluster,
+	// which holds leader election and delegation anchors, and cert-manager
+	// resources unless CertManagerKubeconfigPath is set. When empty, the
 	// controller falls back to in-cluster config / $KUBECONFIG via
 	// ctrl.GetConfig().
 	KubeconfigPath string `json:"kubeconfigPath,omitempty"`
+
+	CertManagerKubeconfigPath string `json:"certManagerKubeconfigPath,omitempty"`
 
 	// Discovery configures how the operator finds project control planes.
 	Discovery DiscoveryConfig `json:"discovery"`

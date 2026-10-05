@@ -22,9 +22,6 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
-    - jsonPath: .status.secretRef.name
-      name: Secret
-      type: string
     - jsonPath: .status.notAfter
       name: NotAfter
       type: string
@@ -36,8 +33,8 @@ spec:
       openAPIV3Schema:
         description: |-
           TLSCertificate requests a publicly trusted TLS certificate for a set of
-          hostnames and delivers it as a kubernetes.io/tls Secret in the same
-          namespace.
+          hostnames. The issued key pair stays on the service cluster and is never
+          written to the project.
         properties:
           apiVersion:
             description: |-
@@ -103,14 +100,6 @@ spec:
                 x-kubernetes-validations:
                 - message: issuance is immutable
                   rule: self == oldSelf
-              secretName:
-                description: |-
-                  SecretName names the kubernetes.io/tls Secret written to the
-                  TLSCertificate's namespace. Defaults to "<metadata.name>-tls".
-                maxLength: 253
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                type: string
             required:
             - dnsNames
             type: object
@@ -118,9 +107,6 @@ spec:
             - message: wildcard names require DNS01 or Auto issuance
               rule: '!has(self.issuance) || self.issuance != ''HTTP01'' || !self.dnsNames.exists(n,
                 n.startsWith(''*.''))'
-            - message: secretName is immutable
-              rule: has(self.secretName) == has(oldSelf.secretName) && (!has(self.secretName)
-                || self.secretName == oldSelf.secretName)
           status:
             description: TLSCertificateStatus defines the observed state of TLSCertificate.
             properties:
@@ -295,36 +281,6 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
-              secretRef:
-                description: |-
-                  SecretRef names the kubernetes.io/tls Secret holding the issued
-                  certificate.
-                properties:
-                  name:
-                    description: Name is the Secret's name.
-                    type: string
-                required:
-                - name
-                type: object
-              serviceSecretRef:
-                description: |-
-                  ServiceSecretRef locates the service's own copy of the issued Secret on
-                  the cluster that runs the certificate service. It is kept in sync with
-                  every issuance and survives suspended renewal. Platform components that distribute the certificate
-                  read it from there with their own credentials rather than from the
-                  project copy, which project editors can change.
-                properties:
-                  name:
-                    description: Name is the Secret's name.
-                    type: string
-                  namespace:
-                    description: Namespace is the Secret's namespace on the service
-                      cluster.
-                    type: string
-                required:
-                - name
-                - namespace
-                type: object
             type: object
         required:
         - spec

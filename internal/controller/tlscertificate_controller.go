@@ -4,10 +4,8 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -27,8 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
-	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
@@ -49,7 +45,6 @@ import (
 
 const (
 	tlsCertificateFinalizer = "certificates.miloapis.com/tlscertificate"
-	fieldManager            = "certificates.miloapis.com"
 	issuingSecretSuffix     = "-issuing"
 
 	// UpstreamUIDLabel binds every service-side resource to the UID of the
@@ -75,9 +70,8 @@ var knownConditions = []string{
 
 // TLSCertificateReconciler issues certificates for TLSCertificates in every
 // engaged project control plane. Each TLSCertificate is backed by a
-// cert-manager Certificate in CertificateNamespace on the local cluster, and
-// the issued key pair is copied back into the project as a kubernetes.io/tls
-// Secret.
+// cert-manager Certificate in CertificateNamespace on the local cluster. The
+// issued key pair stays on the local cluster and is never written to a project.
 type TLSCertificateReconciler struct {
 	CertificateNamespace string
 	HTTP01ClusterIssuer  string
@@ -120,7 +114,7 @@ func (r *TLSCertificateReconciler) Reconcile(ctx context.Context, req mcreconcil
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	certName := serviceCertificateName(req.ClusterName, tc.Namespace, tc.Name, tc.UID)
+	certName := certificatesv1alpha1.StoredSecretName(tc.UID)
 
 	if !tc.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, r.finalize(ctx, cl, req.ClusterName, &tc, certName)
@@ -160,7 +154,6 @@ func (r *TLSCertificateReconciler) computeStatus(
 	localClient := r.mgr.GetLocalManager().GetClient()
 
 	mode := validation.ResolveIssuance(tc.Spec)
-	secretName := projectSecretName(tc)
 	var conditions []metav1.Condition
 	for _, c := range tc.Status.Conditions {
 		if slices.Contains(knownConditions, c.Type) {
@@ -169,7 +162,6 @@ func (r *TLSCertificateReconciler) computeStatus(
 	}
 	tc.Status = certificatesv1alpha1.TLSCertificateStatus{
 		Issuance:           mode,
-		SecretRef:          &certificatesv1alpha1.SecretReference{Name: secretName},
 		Conditions:         conditions,
 		ObservedGeneration: tc.Generation,
 	}
@@ -268,7 +260,7 @@ func (r *TLSCertificateReconciler) computeStatus(
 			"Issuance and renewal start once the DNS delegation records resolve.")
 	}
 
-	notAfter, err := r.syncProjectSecret(ctx, cl, tc, certName, secretName)
+	notAfter, err := r.syncIssued(ctx, tc, certName)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -548,13 +540,12 @@ func sameNames(sans []string, names []certificatesv1alpha1.DNSName) bool {
 	return slices.Equal(slices.Compact(got), slices.Compact(want))
 }
 
-// syncProjectSecret copies the stored key pair into the project and reports
+// syncIssued stores the latest valid issuance on the service side and reports
 // readiness. It returns the leaf's expiry.
-func (r *TLSCertificateReconciler) syncProjectSecret(
+func (r *TLSCertificateReconciler) syncIssued(
 	ctx context.Context,
-	cl cluster.Cluster,
 	tc *certificatesv1alpha1.TLSCertificate,
-	certName, secretName string,
+	certName string,
 ) (*metav1.Time, error) {
 	stored, err := r.storeIssued(ctx, tc, certName)
 	if err != nil {
@@ -564,9 +555,7 @@ func (r *TLSCertificateReconciler) syncProjectSecret(
 		r.setCondition(tc, certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "Pending", "The certificate has not been issued yet.")
 		return nil, nil
 	}
-	issued := *stored
-
-	leaf, err := parseLeaf(issued.Data[corev1.TLSCertKey])
+	leaf, err := parseLeaf(stored.Data[corev1.TLSCertKey])
 	if err != nil {
 		r.setCondition(tc, certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "InvalidCertificate", "The stored certificate could not be parsed.")
 		return nil, nil
@@ -579,36 +568,13 @@ func (r *TLSCertificateReconciler) syncProjectSecret(
 
 	notBefore, notAfter := metav1.NewTime(leaf.NotBefore), metav1.NewTime(leaf.NotAfter)
 	tc.Status.NotBefore, tc.Status.NotAfter = &notBefore, &notAfter
-	tc.Status.ServiceSecretRef = &certificatesv1alpha1.ServiceSecretReference{Namespace: r.CertificateNamespace, Name: certName}
 
 	if !time.Now().Before(leaf.NotAfter) {
 		r.setCondition(tc, certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "Expired", "The certificate has expired.")
 		return nil, nil
 	}
 
-	gvk := certificatesv1alpha1.GroupVersion.WithKind("TLSCertificate")
-	secret := corev1ac.Secret(secretName, tc.Namespace).
-		WithType(corev1.SecretTypeTLS).
-		WithLabels(map[string]string{UpstreamUIDLabel: string(tc.UID)}).
-		WithData(tlsData(&issued)).
-		WithOwnerReferences(metav1ac.OwnerReference().
-			WithAPIVersion(gvk.GroupVersion().String()).
-			WithKind(gvk.Kind).
-			WithName(tc.Name).
-			WithUID(tc.UID).
-			WithController(true).
-			WithBlockOwnerDeletion(true))
-	if err := cl.GetClient().Apply(ctx, secret, client.FieldOwner(fieldManager)); err != nil {
-		if apierrors.IsInvalid(err) || apierrors.IsConflict(err) {
-			r.setCondition(tc, certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "SecretConflict",
-				fmt.Sprintf("Secret %q exists and is not managed by this TLSCertificate.", secretName))
-			return &notAfter, nil
-		}
-		return nil, fmt.Errorf("applying project secret: %w", err)
-	}
-
-	r.setCondition(tc, certificatesv1alpha1.ConditionReady, metav1.ConditionTrue, "Issued",
-		fmt.Sprintf("The certificate is stored in Secret %q.", secretName))
+	r.setCondition(tc, certificatesv1alpha1.ConditionReady, metav1.ConditionTrue, "Issued", "The certificate has been issued.")
 	return &notAfter, nil
 }
 
@@ -641,9 +607,7 @@ func tlsData(issued *corev1.Secret) map[string][]byte {
 	return data
 }
 
-// finalize removes the service-side resources. The project Secret carries a
-// controller reference to the TLSCertificate, so garbage collection removes
-// it; the service never deletes a project Secret it cannot prove it owns.
+// finalize removes the service-side resources.
 func (r *TLSCertificateReconciler) finalize(ctx context.Context, cl cluster.Cluster, clusterName multicluster.ClusterName, tc *certificatesv1alpha1.TLSCertificate, certName string) error {
 	if !controllerutil.ContainsFinalizer(tc, tlsCertificateFinalizer) {
 		return nil
@@ -712,18 +676,6 @@ func (r *TLSCertificateReconciler) resyncInterval() time.Duration {
 		return r.ResyncInterval
 	}
 	return defaultResyncInterval
-}
-
-func projectSecretName(tc *certificatesv1alpha1.TLSCertificate) string {
-	if tc.Spec.SecretName != "" {
-		return tc.Spec.SecretName
-	}
-	return tc.Name + "-tls"
-}
-
-func serviceCertificateName(clusterName multicluster.ClusterName, namespace, name string, uid types.UID) string {
-	sum := sha256.Sum256([]byte(string(clusterName) + "/" + namespace + "/" + name + "/" + string(uid)))
-	return "tc-" + hex.EncodeToString(sum[:16])
 }
 
 // issuingSecretName names the Secret cert-manager writes for certName. The

@@ -11,6 +11,7 @@ import (
 	"go.miloapis.com/milo/pkg/downstreamclient"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
@@ -121,10 +122,13 @@ func (s *OrphanSweeper) Sweep(ctx context.Context) error {
 	}
 
 	for certName, labels := range owners {
-		orphaned, err := s.ownerMissing(ctx, labels)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "checking owner", "certificate", certName)
-			continue
+		orphaned := misnamed(certName, labels)
+		if !orphaned {
+			var err error
+			if orphaned, err = s.ownerMissing(ctx, labels); err != nil {
+				log.FromContext(ctx).Error(err, "checking owner", "certificate", certName)
+				continue
+			}
 		}
 		if !s.expired(certName, orphaned, now(), grace) {
 			continue
@@ -166,6 +170,11 @@ func (s *OrphanSweeper) Sweep(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func misnamed(certName string, labels map[string]string) bool {
+	uid := labels[UpstreamUIDLabel]
+	return uid != "" && certName != certificatesv1alpha1.StoredSecretName(types.UID(uid))
 }
 
 func (s *OrphanSweeper) ownerMissing(ctx context.Context, labels map[string]string) (bool, error) {

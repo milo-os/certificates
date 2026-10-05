@@ -7,7 +7,6 @@ resources:
   - ../../base/crd
   - ../../base/manager
   - ../../base/certmanager
-  - secret-writer.yaml
 
 components:
   - ../../components/namespace

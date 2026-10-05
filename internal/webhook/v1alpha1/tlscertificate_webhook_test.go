@@ -88,7 +88,7 @@ func TestValidateUpdate(t *testing.T) {
 	metadataOnly := oldTC.DeepCopy()
 	metadataOnly.Finalizers = []string{"certificates.miloapis.com/tlscertificate"}
 	specChange := oldTC.DeepCopy()
-	specChange.Spec.SecretName = "other"
+	specChange.Spec.Issuance = certificatesv1alpha1.IssuanceModeHTTP01
 
 	tests := []struct {
 		name        string

@@ -51,6 +51,9 @@ const (
 	// TLSCertificate it was created for.
 	UpstreamUIDLabel = "certificates.miloapis.com/upstream-uid"
 
+	ManagedByLabel = "app.kubernetes.io/managed-by"
+	managedBy      = "certificates.miloapis.com"
+
 	defaultDelegationRecheckInterval = time.Minute
 	defaultDelegatedRecheckInterval  = 15 * time.Minute
 	defaultResyncInterval            = time.Hour
@@ -340,7 +343,7 @@ func (r *TLSCertificateReconciler) ensureCertificate(
 		}
 		cert.Spec.SecretName = issuingSecretName(certName)
 		cert.Spec.SecretTemplate = &cmv1.CertificateSecretTemplate{
-			Labels: map[string]string{UpstreamUIDLabel: string(tc.UID)},
+			Labels: map[string]string{UpstreamUIDLabel: string(tc.UID), ManagedByLabel: managedBy},
 		}
 		cert.Spec.DNSNames = dnsNames
 		cert.Spec.IssuerRef = cmmeta.ObjectReference{
@@ -508,7 +511,7 @@ func (r *TLSCertificateReconciler) storeIssued(ctx context.Context, tc *certific
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: r.CertificateNamespace,
 			Name:      certName,
-			Labels:    map[string]string{UpstreamUIDLabel: string(tc.UID)},
+			Labels:    map[string]string{UpstreamUIDLabel: string(tc.UID), ManagedByLabel: managedBy},
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: tlsData(&issuing),
@@ -710,6 +713,7 @@ func serviceLabels(clusterName multicluster.ClusterName, tc *certificatesv1alpha
 		downstreamclient.UpstreamOwnerNameLabel:        tc.Name,
 		downstreamclient.UpstreamOwnerNamespaceLabel:   tc.Namespace,
 		UpstreamUIDLabel: string(tc.UID),
+		ManagedByLabel:   managedBy,
 	}
 }
 

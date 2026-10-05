@@ -201,7 +201,7 @@ var _ = Describe("TLSCertificate reconciler", func() {
 		Expect(cert.Spec.DNSNames).To(Equal([]string{"app.example.com"}))
 		Expect(cert.Spec.IssuerRef.Name).To(Equal(http01Issuer))
 		Expect(cert.Spec.IssuerRef.Kind).To(Equal(cmv1.ClusterIssuerKind))
-		Expect(cert.Spec.SecretTemplate.Labels).To(Equal(map[string]string{UpstreamUIDLabel: string(tc.UID)}))
+		Expect(cert.Spec.SecretTemplate.Labels).To(Equal(map[string]string{UpstreamUIDLabel: string(tc.UID), ManagedByLabel: managedBy}))
 		Expect(cert.Spec.SecretName).To(Equal(issuingSecretName(certName)))
 		Expect(cert.Labels).To(HaveKeyWithValue(downstreamclient.UpstreamOwnerNameLabel, "web"))
 		Expect(cert.Labels).To(HaveKeyWithValue(downstreamclient.UpstreamOwnerNamespaceLabel, ns))

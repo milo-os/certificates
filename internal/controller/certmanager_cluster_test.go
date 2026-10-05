@@ -165,10 +165,13 @@ var _ = Describe("TLSCertificate reconciler with a separate cert-manager cluster
 		Expect(onCertManager(&corev1.Secret{}, certName)()).To(BeFalse())
 	})
 
-	It("sweeps orphans on the cert-manager cluster and anchors on the local cluster", func() {
+	It("sweeps only its own orphans on the cert-manager cluster and anchors on the local cluster", func() {
 		uid := "uid-cm-orphan"
 		name := certificatesv1alpha1.StoredSecretName(types.UID(uid))
+		foreignUID := "uid-cm-foreign"
+		foreign := certificatesv1alpha1.StoredSecretName(types.UID(foreignUID))
 		labels := map[string]string{
+			ManagedByLabel: managedBy,
 			downstreamclient.UpstreamOwnerClusterNameLabel: "cluster-" + projectC,
 			downstreamclient.UpstreamOwnerGroupLabel:       certificatesv1alpha1.GroupVersion.Group,
 			downstreamclient.UpstreamOwnerKindLabel:        "TLSCertificate",
@@ -185,14 +188,28 @@ var _ = Describe("TLSCertificate reconciler with a separate cert-manager cluster
 			},
 		}
 		Expect(certManagerCl.Create(ctx, cert)).To(Succeed())
-		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: name, Labels: map[string]string{UpstreamUIDLabel: uid}}}
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: name, Labels: map[string]string{UpstreamUIDLabel: uid, ManagedByLabel: managedBy}}}
 		Expect(certManagerCl.Create(ctx, secret)).To(Succeed())
+
+		foreignLabels := map[string]string{}
+		for k, v := range labels {
+			foreignLabels[k] = v
+		}
+		delete(foreignLabels, ManagedByLabel)
+		foreignLabels[UpstreamUIDLabel] = foreignUID
+		foreignCert := cert.DeepCopy()
+		foreignCert.ObjectMeta = metav1.ObjectMeta{Namespace: serviceNamespace, Name: foreign, Labels: foreignLabels}
+		Expect(certManagerCl.Create(ctx, foreignCert)).To(Succeed())
+		foreignSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: foreign + "-other", Labels: map[string]string{UpstreamUIDLabel: foreignUID}}}
+		Expect(certManagerCl.Create(ctx, foreignSecret)).To(Succeed())
 		anchor := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: name, Labels: labels}}
 		Expect(k8sClientC.Create(ctx, anchor)).To(Succeed())
 		Eventually(onCertManager(&cmv1.Certificate{}, name)).Should(BeTrue())
 		Eventually(func(g Gomega) {
 			g.Expect(certManagerSetup.GetClient().Get(ctx, client.ObjectKeyFromObject(cert), &cmv1.Certificate{})).To(Succeed())
 			g.Expect(certManagerSetup.GetClient().Get(ctx, client.ObjectKeyFromObject(secret), &corev1.Secret{})).To(Succeed())
+			g.Expect(certManagerSetup.GetClient().Get(ctx, client.ObjectKeyFromObject(foreignCert), &cmv1.Certificate{})).To(Succeed())
+			g.Expect(certManagerSetup.GetClient().Get(ctx, client.ObjectKeyFromObject(foreignSecret), &corev1.Secret{})).To(Succeed())
 			g.Expect(certManagerMgr.GetLocalManager().GetClient().Get(ctx, client.ObjectKeyFromObject(anchor), &corev1.ConfigMap{})).To(Succeed())
 		}).Should(Succeed())
 
@@ -211,5 +228,7 @@ var _ = Describe("TLSCertificate reconciler with a separate cert-manager cluster
 		Expect(onCertManager(&cmv1.Certificate{}, name)()).To(BeFalse())
 		Expect(onCertManager(&corev1.Secret{}, name)()).To(BeFalse())
 		Expect(onLocalC(&corev1.ConfigMap{}, name)()).To(BeFalse())
+		Expect(onCertManager(&cmv1.Certificate{}, foreign)()).To(BeTrue(), "objects without the operator identity must survive the sweep")
+		Expect(onCertManager(&corev1.Secret{}, foreign+"-other")()).To(BeTrue(), "objects without the operator identity must survive the sweep")
 	})
 })

@@ -86,7 +86,9 @@ with or without `--enable-certificate-owner-ref`.
 
 A finalizer removes the service-side resources when the `TLSCertificate` is
 deleted. A periodic sweep removes them once the `TLSCertificate` or its
-project has been confirmed gone for an hour. A project that is only
+project has been confirmed gone for an hour. It also removes, after the same
+hour, any service-side resource whose name is not derived from the UID it is
+labelled with. A project that is only
 disconnected is never swept.
 
 ## Platform consumer contract

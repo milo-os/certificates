@@ -607,7 +607,7 @@ var _ = Describe("TLSCertificate reconciler", func() {
 })
 
 var _ = Describe("OrphanSweeper", func() {
-	orphanCertificate := func(name, cluster string) *cmv1.Certificate {
+	orphanCertificateNamed := func(name, uid, cluster string) *cmv1.Certificate {
 		cert := &cmv1.Certificate{
 			ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: name, Labels: map[string]string{
 				downstreamclient.UpstreamOwnerClusterNameLabel: "cluster-" + cluster,
@@ -615,7 +615,7 @@ var _ = Describe("OrphanSweeper", func() {
 				downstreamclient.UpstreamOwnerKindLabel:        "TLSCertificate",
 				downstreamclient.UpstreamOwnerNameLabel:        "gone",
 				downstreamclient.UpstreamOwnerNamespaceLabel:   "nowhere",
-				UpstreamUIDLabel: "uid-" + name,
+				UpstreamUIDLabel: uid,
 			}},
 			Spec: cmv1.CertificateSpec{
 				SecretName: name,
@@ -628,6 +628,10 @@ var _ = Describe("OrphanSweeper", func() {
 			g.Expect(mcMgr.GetLocalManager().GetClient().Get(ctx, client.ObjectKeyFromObject(cert), &cmv1.Certificate{})).To(Succeed())
 		}).Should(Succeed())
 		return cert
+	}
+	orphanCertificate := func(seed, cluster string) *cmv1.Certificate {
+		uid := "uid-" + seed
+		return orphanCertificateNamed(certificatesv1alpha1.StoredSecretName(types.UID(uid)), uid, cluster)
 	}
 
 	exists := func(obj client.Object) bool {
@@ -651,7 +655,7 @@ var _ = Describe("OrphanSweeper", func() {
 
 	It("never sweeps a project that is disconnected but still exists", func() {
 		cert := orphanCertificate("disconnected", "project-offline")
-		anchor := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: "disconnected", Labels: cert.Labels}}
+		anchor := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: cert.Name, Labels: cert.Labels}}
 		Expect(k8sClient.Create(ctx, anchor)).To(Succeed())
 
 		projectExists := true
@@ -679,6 +683,28 @@ var _ = Describe("OrphanSweeper", func() {
 		Expect(sweeper.Sweep(ctx)).To(Succeed())
 		Expect(exists(cert)).To(BeFalse())
 		Expect(exists(anchor)).To(BeFalse())
+	})
+
+	It("sweeps resources of a live TLSCertificate left under a name not derived from its UID", func() {
+		ns := newProjectNamespace(k8sClient)
+		tc := newTLSCertificate(ns, "legacy", certificatesv1alpha1.IssuanceModeAuto, "legacy.example.com")
+		Expect(k8sClient.Create(ctx, tc)).To(Succeed())
+		current := &cmv1.Certificate{ObjectMeta: metav1.ObjectMeta{Namespace: serviceNamespace, Name: certNameFor(tc)}}
+		Eventually(serviceCertificateExists(current.Name)).Should(BeTrue())
+
+		legacy := orphanCertificateNamed("tc-legacy-name", string(tc.UID), projectA)
+		legacy.Labels[downstreamclient.UpstreamOwnerNamespaceLabel] = ns
+		legacy.Labels[downstreamclient.UpstreamOwnerNameLabel] = tc.Name
+		Expect(k8sClient.Update(ctx, legacy)).To(Succeed())
+
+		now := time.Now()
+		sweeper := &OrphanSweeper{Manager: mcMgr, CertificateNamespace: serviceNamespace, GracePeriod: time.Hour, now: func() time.Time { return now }}
+		Eventually(func(g Gomega) {
+			g.Expect(sweeper.Sweep(ctx)).To(Succeed())
+			now = now.Add(2 * time.Hour)
+			g.Expect(exists(legacy)).To(BeFalse())
+		}).Should(Succeed())
+		Expect(exists(current)).To(BeTrue())
 	})
 
 	It("keeps resources when the project cannot be checked", func() {

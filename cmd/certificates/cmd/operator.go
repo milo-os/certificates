@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -146,6 +147,7 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 
 			setupLog.Info("server config loaded",
 				"kubeconfigPath", serverConfig.KubeconfigPath,
+				"certManagerKubeconfigPath", serverConfig.CertManagerKubeconfigPath,
 				"discoveryMode", serverConfig.Discovery.Mode,
 			)
 
@@ -188,7 +190,11 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 				return fmt.Errorf("initializing cluster discovery: %w", err)
 			}
 
-			serviceNamespace := map[string]cache.Config{issuance.certificateNamespace: {}}
+			certManager, err := newCertManagerCluster(ctx, serverConfig.CertManagerKubeconfigPath, issuance.certificateNamespace)
+			if err != nil {
+				return err
+			}
+
 			mgrOpts := ctrl.Options{
 				Scheme:                  scheme,
 				Metrics:                 metricsServerOptions,
@@ -198,13 +204,7 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 				LeaderElectionID:        "certificates.miloapis.com",
 				LeaderElectionNamespace: leaderElectionNamespace,
 				Cache: cache.Options{
-					ByObject: map[client.Object]cache.ByObject{
-						&corev1.Secret{}:    {Namespaces: serviceNamespace},
-						&cmv1.Certificate{}: {Namespaces: serviceNamespace},
-						&acmev1.Order{}:     {Namespaces: serviceNamespace},
-						&acmev1.Challenge{}: {Namespaces: serviceNamespace},
-						&corev1.ConfigMap{}: {Namespaces: serviceNamespace},
-					},
+					ByObject: localCacheObjects(issuance.certificateNamespace, certManager != nil),
 				},
 			}
 
@@ -221,6 +221,12 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 				return fmt.Errorf("creating multicluster manager: %w", err)
 			}
 
+			if certManager != nil {
+				if err := mgr.GetLocalManager().Add(certManager); err != nil {
+					return fmt.Errorf("adding cert-manager cluster: %w", err)
+				}
+			}
+
 			if err := (&controller.TLSCertificateReconciler{
 				CertificateNamespace:    issuance.certificateNamespace,
 				HTTP01ClusterIssuer:     issuance.http01ClusterIssuer,
@@ -230,6 +236,7 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 				Resolver:                controller.NewResolver(issuance.dnsResolverAddress),
 				MaxConcurrentReconciles: issuance.maxConcurrent,
 				MaxUnconfirmed:          issuance.maxUnconfirmed,
+				CertManager:             certManager,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("creating TLSCertificate controller: %w", err)
 			}
@@ -238,6 +245,7 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 				Manager:              mgr,
 				Projects:             projects,
 				CertificateNamespace: issuance.certificateNamespace,
+				CertManager:          certManager,
 			}); err != nil {
 				return fmt.Errorf("adding orphan sweeper: %w", err)
 			}
@@ -283,7 +291,7 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 	cmd.Flags().StringVar(&leaderElectionNamespace, "leader-elect-namespace", "", "The namespace to use for leader election.")
 	cmd.Flags().StringVar(&serverConfigFile, "server-config", "", "Path to the server config file.")
 	cmd.Flags().StringVar(&issuance.certificateNamespace, "certificate-namespace", "certificates-system",
-		"Namespace on the local cluster that holds the cert-manager Certificates and issued Secrets backing every TLSCertificate.")
+		"Namespace that holds the cert-manager Certificates and issued Secrets backing every TLSCertificate on the cert-manager cluster, and delegation anchors on the local cluster.")
 	cmd.Flags().StringVar(&issuance.http01ClusterIssuer, "http01-cluster-issuer", "",
 		"cert-manager ClusterIssuer used for HTTP01 issuance. HTTP01 TLSCertificates are not accepted when empty.")
 	cmd.Flags().StringVar(&issuance.dns01ClusterIssuer, "dns01-cluster-issuer", "",
@@ -310,6 +318,54 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 	cmd.Flags().AddGoFlagSet(zapFlags)
 
 	return cmd
+}
+
+func localCacheObjects(namespace string, separateCertManager bool) map[client.Object]cache.ByObject {
+	serviceNamespace := map[string]cache.Config{namespace: {}}
+	objects := map[client.Object]cache.ByObject{
+		&corev1.ConfigMap{}: {Namespaces: serviceNamespace},
+	}
+	if separateCertManager {
+		return objects
+	}
+	objects[&corev1.Secret{}] = cache.ByObject{Namespaces: serviceNamespace}
+	objects[&cmv1.Certificate{}] = cache.ByObject{Namespaces: serviceNamespace}
+	objects[&acmev1.Order{}] = cache.ByObject{Namespaces: serviceNamespace}
+	objects[&acmev1.Challenge{}] = cache.ByObject{Namespaces: serviceNamespace}
+	return objects
+}
+
+func newCertManagerCluster(ctx context.Context, kubeconfigPath, namespace string) (cluster.Cluster, error) {
+	if kubeconfigPath == "" {
+		return nil, nil
+	}
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading cert-manager kubeconfig %q: %w", kubeconfigPath, err)
+	}
+	cl, err := cluster.New(cfg, func(o *cluster.Options) {
+		o.Scheme = scheme
+		o.Cache.DefaultNamespaces = map[string]cache.Config{namespace: {}}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating cert-manager cluster: %w", err)
+	}
+	if err := requireNamespace(ctx, cl.GetAPIReader(), namespace); err != nil {
+		return nil, err
+	}
+	return cl, nil
+}
+
+func requireNamespace(ctx context.Context, reader client.Reader, namespace string) error {
+	var ns corev1.Namespace
+	err := reader.Get(ctx, client.ObjectKey{Name: namespace}, &ns)
+	if apierrors.IsNotFound(err) {
+		return fmt.Errorf("namespace %q does not exist on the cert-manager cluster", namespace)
+	}
+	if err != nil {
+		return fmt.Errorf("checking namespace %q on the cert-manager cluster: %w", namespace, err)
+	}
+	return nil
 }
 
 func initializeClusterDiscovery(

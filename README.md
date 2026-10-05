@@ -96,7 +96,8 @@ disconnected is never swept.
 This is an internal contract for platform components that serve the
 certificate, such as the network services operator, not part of the
 user-facing API. A component holding read access to Secrets in
-`--certificate-namespace` on the service cluster finds the key pair at:
+`--certificate-namespace` on the cert-manager cluster (`certManagerKubeconfigPath`,
+or the service cluster when unset) finds the key pair at:
 
 - namespace: `--certificate-namespace` (`certificates-system` by default);
 - name: `StoredSecretName(uid)` from `go.miloapis.com/certificates/api/v1alpha1`,
@@ -112,7 +113,7 @@ renewal has replaced the key pair.
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--certificate-namespace` | `certificates-system` | Namespace holding the service-side Certificates, issued Secrets and delegation tokens |
+| `--certificate-namespace` | `certificates-system` | Namespace holding the service-side Certificates and issued Secrets on the cert-manager cluster, and delegation tokens on the local cluster |
 | `--http01-cluster-issuer` | empty | cert-manager ClusterIssuer for HTTP01. HTTP01 requests are not accepted when empty |
 | `--dns01-cluster-issuer` | empty | cert-manager ClusterIssuer for DNS01. It must follow CNAMEs (`cnameStrategy: Follow`) and be able to write only to the delegation zone |
 | `--dns01-delegation-zone` | empty | Zone the DNS01 issuer writes challenge records into. Required with `--dns01-cluster-issuer` |
@@ -138,6 +139,7 @@ metricsServer:
   bindAddress: "0"
 webhookServer: {}
 kubeconfigPath: ""
+certManagerKubeconfigPath: ""
 discovery:
   mode: milo
   internalServiceDiscovery: false
@@ -145,8 +147,12 @@ discovery:
   projectKubeconfigPath: /etc/milo/project/kubeconfig
 ```
 
-- `kubeconfigPath`: the cluster that runs cert-manager. Empty uses in-cluster
-  config.
+- `kubeconfigPath`: the local cluster, which holds leader election, the
+  webhook and delegation anchors. Empty uses in-cluster config.
+- `certManagerKubeconfigPath`: the cluster that runs cert-manager and holds the
+  Certificates, Orders, Challenges and issued Secrets in
+  `--certificate-namespace`. Empty uses the local cluster. The namespace must
+  already exist there; the operator refuses to start otherwise.
 - `discovery.mode`: `single` reconciles `TLSCertificates` in the local cluster,
   `milo` reconciles every project control plane.
 
@@ -155,6 +161,21 @@ discovery:
 On the service cluster, a Role in the certificate namespace covers
 `certificates`, `orders` and `challenges` (read), `secrets` and `configmaps`.
 The ClusterRole covers only `tlscertificates`.
+
+When `certManagerKubeconfigPath` is set, the local cluster needs only
+`configmaps` in the certificate namespace, and the identity in that kubeconfig
+needs, on the cert-manager cluster:
+
+- `certificates.cert-manager.io`: get, list, watch, create, update, patch,
+  delete in the certificate namespace
+- `orders` and `challenges.acme.cert-manager.io`: get, list, watch in the
+  certificate namespace
+- `secrets`: get, list, watch, create, update, patch, delete in the certificate
+  namespace
+- `namespaces`: get on the certificate namespace
+
+The `cert-manager-cluster-rbac` component carries these as a Role and a
+ClusterRole for `certificates-system`; bind them to that identity.
 
 In each project control plane, and on the local cluster in `single` discovery
 mode, the service needs:
@@ -165,7 +186,7 @@ mode, the service needs:
 - `namespaces`: get, list, watch
 
 It has no access to Secrets in project control planes and never writes one.
-The key pair lives only in the certificate namespace on the service cluster,
+The key pair lives only in the certificate namespace on the cert-manager cluster,
 and the finalizer and the periodic sweep remove it with the `TLSCertificate`.
 
 ## Prerequisites

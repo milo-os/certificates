@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
@@ -46,6 +47,7 @@ type OrphanSweeper struct {
 	Manager              mcmanager.Manager
 	Projects             ProjectChecker
 	CertificateNamespace string
+	CertManager          cluster.Cluster
 	Interval             time.Duration
 	GracePeriod          time.Duration
 
@@ -89,12 +91,18 @@ func (s *OrphanSweeper) Sweep(ctx context.Context) error {
 	}
 
 	c := s.Manager.GetLocalManager().GetClient()
+	cm := c
 	selector := client.HasLabels{UpstreamUIDLabel}
+	cmSelector := []client.ListOption{client.InNamespace(s.CertificateNamespace), selector}
+	if s.CertManager != nil {
+		cm = s.CertManager.GetClient()
+		cmSelector = append(cmSelector, client.MatchingLabels{ManagedByLabel: managedBy})
+	}
 
 	owners := map[string]map[string]string{}
 	seen := map[string]bool{}
 	var certs cmv1.CertificateList
-	if err := c.List(ctx, &certs, client.InNamespace(s.CertificateNamespace), selector); err != nil {
+	if err := cm.List(ctx, &certs, cmSelector...); err != nil {
 		return err
 	}
 	for i := range certs.Items {
@@ -110,7 +118,7 @@ func (s *OrphanSweeper) Sweep(ctx context.Context) error {
 		seen[anchors.Items[i].Name] = true
 	}
 	var secrets corev1.SecretList
-	if err := c.List(ctx, &secrets, client.InNamespace(s.CertificateNamespace), selector); err != nil {
+	if err := cm.List(ctx, &secrets, cmSelector...); err != nil {
 		return err
 	}
 	for i := range secrets.Items {
@@ -133,7 +141,7 @@ func (s *OrphanSweeper) Sweep(ctx context.Context) error {
 		if !s.expired(certName, orphaned, now(), grace) {
 			continue
 		}
-		if err := deleteServiceResources(ctx, c, s.CertificateNamespace, certName); err != nil {
+		if err := deleteServiceResources(ctx, cm, c, s.CertificateNamespace, certName); err != nil {
 			return err
 		}
 		if req, ok := upstreamRequest(labels); ok {

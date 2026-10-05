@@ -51,6 +51,9 @@ const (
 	// TLSCertificate it was created for.
 	UpstreamUIDLabel = "certificates.miloapis.com/upstream-uid"
 
+	ManagedByLabel = "app.kubernetes.io/managed-by"
+	managedBy      = "certificates.miloapis.com"
+
 	defaultDelegationRecheckInterval = time.Minute
 	defaultDelegatedRecheckInterval  = 15 * time.Minute
 	defaultResyncInterval            = time.Hour
@@ -70,8 +73,9 @@ var knownConditions = []string{
 
 // TLSCertificateReconciler issues certificates for TLSCertificates in every
 // engaged project control plane. Each TLSCertificate is backed by a
-// cert-manager Certificate in CertificateNamespace on the local cluster. The
-// issued key pair stays on the local cluster and is never written to a project.
+// cert-manager Certificate in CertificateNamespace on the cert-manager cluster,
+// which is CertManager when set and the local cluster otherwise. The issued key
+// pair stays on the cert-manager cluster and is never written to a project.
 type TLSCertificateReconciler struct {
 	CertificateNamespace string
 	HTTP01ClusterIssuer  string
@@ -88,7 +92,17 @@ type TLSCertificateReconciler struct {
 	SuspendAfter              time.Duration
 	MaxUnconfirmed            time.Duration
 
-	mgr mcmanager.Manager
+	CertManager cluster.Cluster
+
+	mgr                mcmanager.Manager
+	skipNameValidation bool
+}
+
+func (r *TLSCertificateReconciler) certManagerCluster() cluster.Cluster {
+	if r.CertManager != nil {
+		return r.CertManager
+	}
+	return r.mgr.GetLocalManager()
 }
 
 // +kubebuilder:rbac:groups=certificates.miloapis.com,resources=tlscertificates,verbs=get;list;watch;patch
@@ -151,7 +165,7 @@ func (r *TLSCertificateReconciler) computeStatus(
 	tc *certificatesv1alpha1.TLSCertificate,
 	certName string,
 ) (ctrl.Result, error) {
-	localClient := r.mgr.GetLocalManager().GetClient()
+	cmClient := r.certManagerCluster().GetClient()
 
 	mode := validation.ResolveIssuance(tc.Spec)
 	var conditions []metav1.Condition
@@ -168,7 +182,7 @@ func (r *TLSCertificateReconciler) computeStatus(
 	result := ctrl.Result{RequeueAfter: r.resyncInterval()}
 
 	cert := &cmv1.Certificate{ObjectMeta: metav1.ObjectMeta{Name: certName, Namespace: r.CertificateNamespace}}
-	if err := localClient.Get(ctx, client.ObjectKeyFromObject(cert), cert); err != nil {
+	if err := cmClient.Get(ctx, client.ObjectKeyFromObject(cert), cert); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("getting certificate %s: %w", certName, err)
 		}
@@ -297,7 +311,7 @@ func (r *TLSCertificateReconciler) suspend(ctx context.Context, cert *cmv1.Certi
 	if cert == nil {
 		return nil
 	}
-	if err := client.IgnoreNotFound(r.mgr.GetLocalManager().GetClient().Delete(ctx, cert)); err != nil {
+	if err := client.IgnoreNotFound(r.certManagerCluster().GetClient().Delete(ctx, cert)); err != nil {
 		return fmt.Errorf("suspending certificate %s: %w", cert.Name, err)
 	}
 	log.FromContext(ctx).Info("suspended certificate", "certificate", cert.Name)
@@ -317,7 +331,7 @@ func (r *TLSCertificateReconciler) ensureCertificate(
 	}
 
 	cert := &cmv1.Certificate{ObjectMeta: metav1.ObjectMeta{Name: certName, Namespace: r.CertificateNamespace}}
-	op, err := controllerutil.CreateOrUpdate(ctx, r.mgr.GetLocalManager().GetClient(), cert, func() error {
+	op, err := controllerutil.CreateOrUpdate(ctx, r.certManagerCluster().GetClient(), cert, func() error {
 		if !cert.CreationTimestamp.IsZero() && cert.Labels[UpstreamUIDLabel] != string(tc.UID) {
 			return fmt.Errorf("certificate %s belongs to another TLSCertificate", certName)
 		}
@@ -329,7 +343,7 @@ func (r *TLSCertificateReconciler) ensureCertificate(
 		}
 		cert.Spec.SecretName = issuingSecretName(certName)
 		cert.Spec.SecretTemplate = &cmv1.CertificateSecretTemplate{
-			Labels: map[string]string{UpstreamUIDLabel: string(tc.UID)},
+			Labels: map[string]string{UpstreamUIDLabel: string(tc.UID), ManagedByLabel: managedBy},
 		}
 		cert.Spec.DNSNames = dnsNames
 		cert.Spec.IssuerRef = cmmeta.ObjectReference{
@@ -350,10 +364,10 @@ func (r *TLSCertificateReconciler) ensureCertificate(
 }
 
 func (r *TLSCertificateReconciler) observeChallenges(ctx context.Context, tc *certificatesv1alpha1.TLSCertificate, certName string) (string, error) {
-	localClient := r.mgr.GetLocalManager().GetClient()
+	cmClient := r.certManagerCluster().GetClient()
 
 	var orders acmev1.OrderList
-	if err := localClient.List(ctx, &orders, client.InNamespace(r.CertificateNamespace)); err != nil {
+	if err := cmClient.List(ctx, &orders, client.InNamespace(r.CertificateNamespace)); err != nil {
 		return "", fmt.Errorf("listing orders: %w", err)
 	}
 	orderUIDs := map[types.UID]bool{}
@@ -370,7 +384,7 @@ func (r *TLSCertificateReconciler) observeChallenges(ctx context.Context, tc *ce
 	}
 
 	var challenges acmev1.ChallengeList
-	if err := localClient.List(ctx, &challenges, client.InNamespace(r.CertificateNamespace)); err != nil {
+	if err := cmClient.List(ctx, &challenges, client.InNamespace(r.CertificateNamespace)); err != nil {
 		return "", fmt.Errorf("listing challenges: %w", err)
 	}
 
@@ -461,7 +475,7 @@ func certManagerCondition(cert *cmv1.Certificate, t cmv1.CertificateConditionTyp
 // one already stored. Ordering by issue time lets an emergency re-key with a
 // shorter lifetime replace a compromised key straight away.
 func (r *TLSCertificateReconciler) storeIssued(ctx context.Context, tc *certificatesv1alpha1.TLSCertificate, certName string) (*corev1.Secret, error) {
-	c := r.mgr.GetLocalManager().GetClient()
+	c := r.certManagerCluster().GetClient()
 
 	stored := &corev1.Secret{}
 	err := c.Get(ctx, types.NamespacedName{Namespace: r.CertificateNamespace, Name: certName}, stored)
@@ -497,7 +511,7 @@ func (r *TLSCertificateReconciler) storeIssued(ctx context.Context, tc *certific
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: r.CertificateNamespace,
 			Name:      certName,
-			Labels:    map[string]string{UpstreamUIDLabel: string(tc.UID)},
+			Labels:    map[string]string{UpstreamUIDLabel: string(tc.UID), ManagedByLabel: managedBy},
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: tlsData(&issuing),
@@ -612,7 +626,7 @@ func (r *TLSCertificateReconciler) finalize(ctx context.Context, cl cluster.Clus
 	if !controllerutil.ContainsFinalizer(tc, tlsCertificateFinalizer) {
 		return nil
 	}
-	if err := deleteServiceResources(ctx, r.mgr.GetLocalManager().GetClient(), r.CertificateNamespace, certName); err != nil {
+	if err := deleteServiceResources(ctx, r.certManagerCluster().GetClient(), r.mgr.GetLocalManager().GetClient(), r.CertificateNamespace, certName); err != nil {
 		return err
 	}
 	delegationUnconfirmedSeconds.DeleteLabelValues(string(clusterName), tc.Namespace, tc.Name)
@@ -625,16 +639,19 @@ func (r *TLSCertificateReconciler) finalize(ctx context.Context, cl cluster.Clus
 	return nil
 }
 
-func deleteServiceResources(ctx context.Context, c client.Client, namespace, certName string) error {
+func deleteServiceResources(ctx context.Context, certManager, local client.Client, namespace, certName string) error {
 	meta := metav1.ObjectMeta{Name: certName, Namespace: namespace}
-	for _, obj := range []client.Object{
-		&cmv1.Certificate{ObjectMeta: meta},
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: issuingSecretName(certName), Namespace: namespace}},
-		&corev1.Secret{ObjectMeta: meta},
-		&corev1.ConfigMap{ObjectMeta: meta},
+	for _, del := range []struct {
+		c   client.Client
+		obj client.Object
+	}{
+		{certManager, &cmv1.Certificate{ObjectMeta: meta}},
+		{certManager, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: issuingSecretName(certName), Namespace: namespace}}},
+		{certManager, &corev1.Secret{ObjectMeta: meta}},
+		{local, &corev1.ConfigMap{ObjectMeta: meta}},
 	} {
-		if err := client.IgnoreNotFound(c.Delete(ctx, obj)); err != nil {
-			return fmt.Errorf("deleting %T %s/%s: %w", obj, namespace, certName, err)
+		if err := client.IgnoreNotFound(del.c.Delete(ctx, del.obj)); err != nil {
+			return fmt.Errorf("deleting %T %s/%s: %w", del.obj, namespace, certName, err)
 		}
 	}
 	return nil
@@ -696,33 +713,40 @@ func serviceLabels(clusterName multicluster.ClusterName, tc *certificatesv1alpha
 		downstreamclient.UpstreamOwnerNameLabel:        tc.Name,
 		downstreamclient.UpstreamOwnerNamespaceLabel:   tc.Namespace,
 		UpstreamUIDLabel: string(tc.UID),
+		ManagedByLabel:   managedBy,
 	}
 }
 
 // SetupWithManager registers the reconciler, watching TLSCertificates in every
 // engaged project control plane and the cert-manager resources that back them
-// on the local cluster.
+// on the cert-manager cluster.
 func (r *TLSCertificateReconciler) SetupWithManager(mgr mcmanager.Manager) error {
 	r.mgr = mgr
-	local := mgr.GetLocalManager()
+	certManager := r.certManagerCluster()
+	anchors := mgr.GetLocalManager().GetClient()
 
 	workers := r.MaxConcurrentReconciles
 	if workers <= 0 {
 		workers = defaultMaxConcurrentReconciles
 	}
 
+	opts := controller.TypedOptions[mcreconcile.Request]{MaxConcurrentReconciles: workers}
+	if r.skipNameValidation {
+		opts.SkipNameValidation = &r.skipNameValidation
+	}
+
 	return mcbuilder.ControllerManagedBy(mgr).
 		For(&certificatesv1alpha1.TLSCertificate{}).
-		WithOptions(controller.TypedOptions[mcreconcile.Request]{MaxConcurrentReconciles: workers}).
+		WithOptions(opts).
 		WatchesRawSource(milosource.MustNewClusterSource(
-			local,
+			certManager,
 			&cmv1.Certificate{},
 			downstreamclient.TypedEnqueueRequestsForUpstreamOwner[*cmv1.Certificate](&certificatesv1alpha1.TLSCertificate{}),
 		)).
 		WatchesRawSource(milosource.MustNewClusterSource(
-			local,
+			certManager,
 			&corev1.Secret{},
-			enqueueForCertificateOf(func(_ context.Context, _ client.Client, s *corev1.Secret) string {
+			enqueueForCertificateOf(anchors, func(_ context.Context, _ client.Client, s *corev1.Secret) string {
 				if s.Labels[UpstreamUIDLabel] == "" {
 					return ""
 				}
@@ -730,16 +754,16 @@ func (r *TLSCertificateReconciler) SetupWithManager(mgr mcmanager.Manager) error
 			}),
 		)).
 		WatchesRawSource(milosource.MustNewClusterSource(
-			local,
+			certManager,
 			&acmev1.Order{},
-			enqueueForCertificateOf(func(_ context.Context, _ client.Client, o *acmev1.Order) string {
+			enqueueForCertificateOf(anchors, func(_ context.Context, _ client.Client, o *acmev1.Order) string {
 				return o.Annotations[cmv1.CertificateNameKey]
 			}),
 		)).
 		WatchesRawSource(milosource.MustNewClusterSource(
-			local,
+			certManager,
 			&acmev1.Challenge{},
-			enqueueForCertificateOf(func(ctx context.Context, c client.Client, ch *acmev1.Challenge) string {
+			enqueueForCertificateOf(anchors, func(ctx context.Context, c client.Client, ch *acmev1.Challenge) string {
 				owner := metav1.GetControllerOf(ch)
 				if owner == nil || owner.Kind != "Order" {
 					return ""
@@ -755,32 +779,39 @@ func (r *TLSCertificateReconciler) SetupWithManager(mgr mcmanager.Manager) error
 		Complete(r)
 }
 
-// enqueueForCertificateOf maps a local object to the TLSCertificate that owns
-// the named service-side resource, reading the upstream labels from the
-// Certificate or, when renewal is suspended, the delegation anchor.
-func enqueueForCertificateOf[T client.Object](certificateName func(context.Context, client.Client, T) string) mchandler.TypedEventHandlerFunc[T, mcreconcile.Request] {
+// enqueueForCertificateOf maps a cert-manager cluster object to the
+// TLSCertificate that owns the named service-side resource, reading the
+// upstream labels from the Certificate or, when renewal is suspended, the
+// delegation anchor on the local cluster.
+func enqueueForCertificateOf[T client.Object](anchors client.Reader, certificateName func(context.Context, client.Client, T) string) mchandler.TypedEventHandlerFunc[T, mcreconcile.Request] {
 	return func(_ multicluster.ClusterName, cl cluster.Cluster) handler.TypedEventHandler[T, mcreconcile.Request] {
 		return handler.TypedEnqueueRequestsFromMapFunc(func(ctx context.Context, obj T) []mcreconcile.Request {
 			name := certificateName(ctx, cl.GetClient(), obj)
 			if name == "" {
 				return nil
 			}
-			key := types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}
-			var cert cmv1.Certificate
-			if err := cl.GetClient().Get(ctx, key, &cert); err == nil {
-				if req, ok := upstreamRequest(cert.Labels); ok {
-					return []mcreconcile.Request{req}
-				}
-			}
-			var anchor corev1.ConfigMap
-			if err := cl.GetClient().Get(ctx, key, &anchor); err == nil {
-				if req, ok := upstreamRequest(anchor.Labels); ok {
-					return []mcreconcile.Request{req}
-				}
+			if req, ok := ownerOf(ctx, cl.GetClient(), anchors, types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}); ok {
+				return []mcreconcile.Request{req}
 			}
 			return nil
 		})
 	}
+}
+
+func ownerOf(ctx context.Context, certs, anchors client.Reader, key types.NamespacedName) (mcreconcile.Request, bool) {
+	var cert cmv1.Certificate
+	if err := certs.Get(ctx, key, &cert); err == nil {
+		if req, ok := upstreamRequest(cert.Labels); ok {
+			return req, true
+		}
+	}
+	var anchor corev1.ConfigMap
+	if err := anchors.Get(ctx, key, &anchor); err == nil {
+		if req, ok := upstreamRequest(anchor.Labels); ok {
+			return req, true
+		}
+	}
+	return mcreconcile.Request{}, false
 }
 
 func upstreamRequest(labels map[string]string) (mcreconcile.Request, bool) {

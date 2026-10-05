@@ -3,9 +3,13 @@ kind: TLSCertificateOperator
 metricsServer:
   bindAddress: "0"
 webhookServer: {}
-# kubeconfigPath points at the cluster that runs cert-manager and holds the
-# service-side Certificates. Leave empty to use in-cluster config.
+# kubeconfigPath points at the local cluster, which holds leader election and
+# delegation anchors. Leave empty to use in-cluster config.
 # kubeconfigPath: /etc/certificates/kubeconfig
+# certManagerKubeconfigPath points at the cluster that runs cert-manager and
+# holds the Certificates and issued Secrets. Leave empty to use the cluster
+# above.
+# certManagerKubeconfigPath: /etc/certificates/cert-manager/kubeconfig
 # discovery selects how project control planes are found. The default,
 # "single", reconciles TLSCertificates in the local cluster only.
 # discovery:

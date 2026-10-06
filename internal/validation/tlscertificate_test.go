@@ -30,6 +30,9 @@ func TestValidateSpec(t *testing.T) {
 		{name: "internal tld", spec: spec(certificatesv1alpha1.IssuanceModeAuto, "foo.internal")},
 		{name: "local wildcard", spec: spec(certificatesv1alpha1.IssuanceModeDNS01, "*.foo.local")},
 		{name: "unlisted tld", spec: spec(certificatesv1alpha1.IssuanceModeAuto, "app.example")},
+		{name: "unlisted tld subdomain", spec: spec(certificatesv1alpha1.IssuanceModeAuto, "app.foo.example")},
+		{name: "local tld subdomain", spec: spec(certificatesv1alpha1.IssuanceModeAuto, "app.foo.local")},
+		{name: "wildcard-only tld exception", spec: spec(certificatesv1alpha1.IssuanceModeAuto, "www.ck"), valid: true},
 		{name: "lookalike of denied suffix", spec: spec(certificatesv1alpha1.IssuanceModeAuto, "notdatumproxy.net"), valid: true},
 		{name: "wildcard http01", spec: spec(certificatesv1alpha1.IssuanceModeHTTP01, "*.example.com")},
 		{name: "denied apex", spec: spec(certificatesv1alpha1.IssuanceModeAuto, "datumproxy.net")},
@@ -57,6 +60,34 @@ func TestValidateSpec(t *testing.T) {
 				t.Fatal("expected errors")
 			}
 		})
+	}
+}
+
+func TestValidateSpecWildcardOnlyCountryTLDs(t *testing.T) {
+	for _, tld := range []string{"np", "ck", "er", "fk", "jm", "kh", "mm", "pg"} {
+		tests := []struct {
+			name  string
+			spec  certificatesv1alpha1.TLSCertificateSpec
+			valid bool
+		}{
+			{name: "registrable name", spec: spec(certificatesv1alpha1.IssuanceModeAuto, certificatesv1alpha1.DNSName("foo.com."+tld)), valid: true},
+			{name: "subdomain", spec: spec(certificatesv1alpha1.IssuanceModeAuto, certificatesv1alpha1.DNSName("app.foo.com."+tld)), valid: true},
+			{name: "wildcard", spec: spec(certificatesv1alpha1.IssuanceModeDNS01, certificatesv1alpha1.DNSName("*.foo.com."+tld)), valid: true},
+			{name: "public suffix", spec: spec(certificatesv1alpha1.IssuanceModeAuto, certificatesv1alpha1.DNSName("com."+tld))},
+			{name: "public suffix wildcard", spec: spec(certificatesv1alpha1.IssuanceModeDNS01, certificatesv1alpha1.DNSName("*.com."+tld))},
+			{name: "bare tld", spec: spec(certificatesv1alpha1.IssuanceModeAuto, certificatesv1alpha1.DNSName(tld))},
+		}
+		for _, tt := range tests {
+			t.Run(tld+"/"+tt.name, func(t *testing.T) {
+				errs := ValidateSpec(tt.spec, field.NewPath("spec"), nil)
+				if tt.valid && len(errs) > 0 {
+					t.Fatalf("expected valid, got %v", errs)
+				}
+				if !tt.valid && len(errs) == 0 {
+					t.Fatal("expected errors")
+				}
+			})
+		}
 	}
 }
 

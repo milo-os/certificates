@@ -22,7 +22,7 @@ const (
 
 	// IssuanceModeDNS01 validates each name through a TXT record that the
 	// service publishes in its delegation zone, reached through a CNAME the
-	// name's owner publishes to status.delegationTarget.
+	// name's owner publishes as listed in status.requiredDNSRecords.
 	IssuanceModeDNS01 IssuanceMode = "DNS01"
 )
 

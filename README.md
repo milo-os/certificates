@@ -34,7 +34,9 @@ spec:
   Targets are held per project namespace and name, so recreating a
   TLSCertificate for the same name in the same namespace keeps the target
   and the published CNAME keeps working. Issuance starts only once every
-  CNAME resolves to its exact target.
+  CNAME resolves to its exact target. Each CNAME must point directly at the
+  target. A chain of CNAMEs is not followed, because the check compares only
+  the first hop.
 - Renewal is suspended when delegation is definitively broken (the record
   does not exist, or points elsewhere) on three checks spanning at least 30
   minutes, and a good result resets the count. Timeouts, server failures and
@@ -267,7 +269,7 @@ certificates/
 │   ├── app/routes/             # File-based Remix routes
 │   └── app/lib/                # k8s server client, kubeconfig, types
 ├── test/e2e/                   # Chainsaw test cases
-└── hack/
+└── hack/                       # License header boilerplate for generated code
 ```
 
 ---
@@ -292,4 +294,4 @@ certificates/
 
 ## Deploying
 
-The repository includes a GitHub Actions publish workflow that triggers on merge to `main`. It builds and pushes the controller Docker image and Kustomize bundles to `ghcr.io/milo-os/<service-name>`. No additional configuration is needed beyond setting the standard `GITHUB_TOKEN` secret, which Actions provides automatically.
+The repository includes a GitHub Actions publish workflow that triggers on merge to `main`. It builds and pushes the controller Docker image and Kustomize bundles to `ghcr.io/milo-os/certificates` (image) and `ghcr.io/milo-os/certificates-kustomize` (bundle). No additional configuration is needed beyond setting the standard `GITHUB_TOKEN` secret, which Actions provides automatically.

@@ -10,4 +10,5 @@ spec:
   includedPermissions:
     - certificates.miloapis.com/tlscertificates.list
     - certificates.miloapis.com/tlscertificates.get
+    - certificates.miloapis.com/tlscertificates/status.get
     - certificates.miloapis.com/tlscertificates.watch

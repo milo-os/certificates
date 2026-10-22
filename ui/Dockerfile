@@ -1,6 +1,6 @@
-FROM node:20-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:26.12.1-alpine3.24 AS builder
 
-RUN corepack enable && corepack prepare pnpm@10.29.3 --activate
+RUN npm install -g pnpm@10.29.3
 
 WORKDIR /app
 
@@ -11,9 +11,9 @@ COPY app/ ./app/
 RUN pnpm install --frozen-lockfile=false
 RUN pnpm run build
 
-FROM node:20-alpine AS runtime
+FROM --platform=$BUILDPLATFORM node:26.12.1-alpine3.24 AS prod-deps
 
-RUN corepack enable && corepack prepare pnpm@10.29.3 --activate
+RUN npm install -g pnpm@10.29.3
 
 WORKDIR /app
 
@@ -21,6 +21,15 @@ COPY --from=builder /app/package.json /app/pnpm-workspace.yaml ./
 COPY --from=builder /app/pnpm-lock.yaml* ./
 RUN pnpm install --prod --frozen-lockfile=false
 
+FROM node:26.12.1-alpine3.24 AS runtime
+
+RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0'
+RUN ! grep -q MIICTjCCAdOgAwIBAgIKPPYHqWhwDtqLhDAKBggqhkjOPQQDAzBrMQswCQYDVQQG /etc/ssl/certs/ca-certificates.crt
+
+WORKDIR /app
+
+COPY --from=prod-deps /app/package.json ./
+COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=builder /app/build ./build
 
 EXPOSE 3000

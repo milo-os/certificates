@@ -195,7 +195,7 @@ and the finalizer and the periodic sweep remove it with the `TLSCertificate`.
 
 | Tool | Version | Install |
 |------|---------|---------|
-| Go | 1.25+ | https://go.dev/dl |
+| Go | 1.26+ | https://go.dev/dl |
 | Docker | recent | https://docs.docker.com/get-docker |
 | kind | v0.20+ | `go install sigs.k8s.io/kind@latest` |
 | Task | v3+ | https://taskfile.dev/installation |

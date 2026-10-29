@@ -11,7 +11,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
-    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.14.0
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.24.0
     with:
       image-name: certificates
       registry-organization: milo-os
@@ -23,7 +23,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
-    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.14.0
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.24.0
     with:
       image-name: certificates-ui
       registry-organization: milo-os
@@ -38,7 +38,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
-    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.14.0
+    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.24.0
     with:
       bundle-name: ghcr.io/milo-os/certificates-kustomize
       bundle-path: config

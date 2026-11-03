@@ -2,6 +2,8 @@ module go.miloapis.com/certificates
 
 go 1.27.0
 
+toolchain go1.27.3
+
 require (
 	github.com/cert-manager/cert-manager v1.17.2
 	github.com/onsi/ginkgo/v2 v2.27.4

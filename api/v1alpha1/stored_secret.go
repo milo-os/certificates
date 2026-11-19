@@ -17,3 +17,8 @@ func StoredSecretName(uid types.UID) string {
 	sum := sha256.Sum256([]byte(uid))
 	return "tc-" + hex.EncodeToString(sum[:16])
 }
+
+func CertificateRevision(leafDER []byte) string {
+	sum := sha256.Sum256(leafDER)
+	return hex.EncodeToString(sum[:])
+}

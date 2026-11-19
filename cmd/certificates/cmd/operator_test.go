@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
 
 	"go.miloapis.com/certificates/internal/config"
+	"go.miloapis.com/certificates/internal/managedconnect"
 )
 
 func TestDefaultFlagsRequireServiceIdentitiesWithWebhook(t *testing.T) {
@@ -72,6 +73,29 @@ func TestDNS01FlagsMustBeSetTogether(t *testing.T) {
 	}
 	f.dns01DelegationZone = "acme-dns.example.net"
 	if err := f.validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagedConnectFlags(t *testing.T) {
+	flags := issuanceFlags{certificateNamespace: "certificates-system", dns01ClusterIssuer: "dns01", dns01DelegationZone: "acme.example.net"}
+	if err := flags.validate(); err != nil {
+		t.Fatal(err)
+	}
+	flags.managedConnectKubeconfig = "/etc/certificates/managed-connect/kubeconfig.yaml"
+	if err := flags.validate(); err == nil {
+		t.Fatal("partial managed configuration accepted")
+	}
+	flags.managedConnect = managedconnect.Authorizer{ClusterName: "service-project", Namespace: "connect", DomainSuffix: "connect.example.com", WriterIdentities: []string{"system:managed-endpoints@connect.datumapis.com"}}
+	if err := flags.validate(); err != nil {
+		t.Fatal(err)
+	}
+	flags.managedConnect.DomainSuffix = "*.example.com"
+	if err := flags.validate(); err == nil {
+		t.Fatal("wildcard domain boundary accepted")
+	}
+	command := newOperatorCommand(BuildInfo{})
+	if err := command.Flags().Parse([]string{"--server-config=config.yaml", "--managed-connect-kubeconfig=reader.yaml", "--managed-connect-cluster-name=project", "--managed-connect-namespace=connect", "--managed-connect-domain-suffix=connect.example.com", "--managed-connect-writer-identities=system:managed-endpoints@connect.datumapis.com"}); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 
+	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -14,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	certificatesv1alpha1 "go.miloapis.com/certificates/api/v1alpha1"
+	"go.miloapis.com/certificates/internal/managedconnect"
 	"go.miloapis.com/certificates/internal/validation"
 )
 
@@ -35,8 +37,10 @@ func SetupWebhookWithManager(mgr ctrl.Manager, v *Validator) error {
 //     deletion: WriterIdentities, ServiceIdentities or DeleterIdentities
 //   - delete: WriterIdentities, ServiceIdentities or DeleterIdentities
 //
-// An empty WriterIdentities list turns off every check except the status one.
+// An empty WriterIdentities list turns off ordinary identity checks except
+// status writes. Managed issuance always requires its own identity and scope.
 type Validator struct {
+	ManagedConnect       *managedconnect.Authorizer
 	DeniedDomainSuffixes []string
 	WriterIdentities     []string
 	ServiceIdentities    []string
@@ -46,6 +50,9 @@ type Validator struct {
 var _ admission.Validator[*certificatesv1alpha1.TLSCertificate] = &Validator{}
 
 func (v *Validator) ValidateCreate(ctx context.Context, tc *certificatesv1alpha1.TLSCertificate) (admission.Warnings, error) {
+	if tc.Spec.ManagedAuthorization != nil {
+		return nil, v.validateManaged(ctx, tc)
+	}
 	if err := v.authorize(ctx, tc, "create TLSCertificates", v.WriterIdentities); err != nil {
 		return nil, err
 	}
@@ -63,8 +70,14 @@ func (v *Validator) ValidateUpdate(ctx context.Context, oldTC, tc *certificatesv
 		}
 		return nil, forbidden(tc, req.UserInfo.Username, "write TLSCertificate status")
 	}
+	if !equality.Semantic.DeepEqual(oldTC.Spec.ManagedAuthorization, tc.Spec.ManagedAuthorization) {
+		return nil, forbidden(tc, req.UserInfo.Username, "change immutable managedAuthorization")
+	}
 	if equality.Semantic.DeepEqual(oldTC.Spec, tc.Spec) {
 		return nil, v.authorize(ctx, tc, "update TLSCertificates", v.WriterIdentities, v.ServiceIdentities, v.DeleterIdentities)
+	}
+	if tc.Spec.ManagedAuthorization != nil {
+		return nil, v.validateManaged(ctx, tc)
 	}
 	if err := v.authorize(ctx, tc, "change the spec of TLSCertificates", v.WriterIdentities); err != nil {
 		return nil, err
@@ -84,6 +97,9 @@ func (v *Validator) authorize(ctx context.Context, tc *certificatesv1alpha1.TLSC
 	if err != nil {
 		return apierrors.NewInternalError(err)
 	}
+	if tc.Spec.ManagedAuthorization != nil && v.ManagedConnect != nil && slices.Contains(v.ManagedConnect.WriterIdentities, req.UserInfo.Username) && managedCluster(req) == v.ManagedConnect.ClusterName && tc.Namespace == v.ManagedConnect.Namespace {
+		return nil
+	}
 	for _, identities := range allowed {
 		if slices.Contains(identities, req.UserInfo.Username) {
 			return nil
@@ -98,9 +114,40 @@ func forbidden(tc *certificatesv1alpha1.TLSCertificate, username, action string)
 }
 
 func (v *Validator) validateSpec(tc *certificatesv1alpha1.TLSCertificate) error {
-	errs := validation.ValidateSpec(tc.Spec, field.NewPath("spec"), v.DeniedDomainSuffixes)
+	denied := slices.Clone(v.DeniedDomainSuffixes)
+	if v.ManagedConnect != nil {
+		denied = append(denied, v.ManagedConnect.DomainSuffix)
+	}
+	return invalidSpec(tc, denied)
+}
+
+func invalidSpec(tc *certificatesv1alpha1.TLSCertificate, denied []string) error {
+	errs := validation.ValidateSpec(tc.Spec, field.NewPath("spec"), denied)
 	if len(errs) == 0 {
 		return nil
 	}
 	return apierrors.NewInvalid(certificatesv1alpha1.GroupVersion.WithKind("TLSCertificate").GroupKind(), tc.Name, errs)
+}
+
+func (v *Validator) validateManaged(ctx context.Context, tc *certificatesv1alpha1.TLSCertificate) error {
+	req, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		return apierrors.NewInternalError(err)
+	}
+	if v.ManagedConnect == nil || !slices.Contains(v.ManagedConnect.WriterIdentities, req.UserInfo.Username) {
+		return forbidden(tc, req.UserInfo.Username, "request managed Connect issuance")
+	}
+	if err := v.ManagedConnect.Verify(ctx, tc, managedCluster(req), false); err != nil {
+		return apierrors.NewForbidden(certificatesv1alpha1.GroupVersion.WithResource("tlscertificates").GroupResource(), tc.Name, err)
+	}
+	return invalidSpec(tc, []string{v.ManagedConnect.DelegationZone})
+}
+
+func managedCluster(req admission.Request) string {
+	kinds := req.UserInfo.Extra[iamv1alpha1.ParentKindExtraKey]
+	names := req.UserInfo.Extra[iamv1alpha1.ParentNameExtraKey]
+	if len(kinds) != 1 || kinds[0] != "Project" || len(names) != 1 {
+		return ""
+	}
+	return names[0]
 }

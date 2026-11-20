@@ -2,7 +2,14 @@ package controller
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"math/big"
+	"reflect"
 	"testing"
 	"time"
 
@@ -13,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -101,10 +109,62 @@ func TestManagedAuthorizationReconcileRetryAndSuspension(t *testing.T) {
 	if issued.Spec.IssuerRef.Name != "dns01" || issued.Spec.SecretName != name+"-issuing" || issued.Labels[UpstreamUIDLabel] != string(tc.UID) {
 		t.Fatalf("issuance consumer contract broken: %+v", issued.Spec)
 	}
-	stored := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: reconciler.CertificateNamespace, Labels: map[string]string{UpstreamUIDLabel: string(tc.UID)}}, Data: map[string][]byte{corev1.TLSPrivateKeyKey: []byte("retain-during-suspension")}}
-	if err := serviceClient.Create(ctx, stored); err != nil {
+	issuing := managedIssuedSecret(t, name+"-issuing", reconciler.CertificateNamespace, tc)
+	if err := serviceClient.Create(ctx, issuing); err != nil {
 		t.Fatal(err)
 	}
+	reconcile()
+	stored := &corev1.Secret{}
+	if err := serviceClient.Get(ctx, client.ObjectKey{Namespace: reconciler.CertificateNamespace, Name: name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("network binding churn preserves shared gateway certificate", func(t *testing.T) {
+		for _, field := range [][]string{{"spec", "networkUID"}, {"spec", "assignment", "vpcRef"}} {
+			if _, found, err := unstructured.NestedFieldNoCopy(endpoint.Object, field...); err != nil || found {
+				t.Fatalf("reservation must be network-independent: %v", field)
+			}
+		}
+		if ready := condition(tc, certificates.ConditionReady); ready == nil || ready.Status != metav1.ConditionTrue || tc.Status.CertificateRevision == "" {
+			t.Fatal("expected a valid issued shared certificate")
+		}
+		beforeCertificate, beforeSecret := issued.DeepCopy(), stored.DeepCopy()
+		beforeRequest := tc.DeepCopy()
+		customerClient := fake.NewClientBuilder().Build()
+		binding := func(name, uid string) *unstructured.Unstructured {
+			object := &unstructured.Unstructured{}
+			object.SetAPIVersion("connect.datumapis.com/v1alpha1")
+			object.SetKind("ConnectNetworkBinding")
+			object.SetNamespace("customer")
+			object.SetName(name)
+			object.SetUID(types.UID(uid))
+			return object
+		}
+		first, second := binding("first-network", "binding-first"), binding("second-network", "binding-second")
+		for _, change := range []func() error{
+			func() error { return customerClient.Create(ctx, first) },
+			func() error { return customerClient.Create(ctx, second) },
+			func() error { return customerClient.Delete(ctx, first) },
+			func() error { return customerClient.Create(ctx, binding(first.GetName(), "replacement-binding")) },
+			func() error { return customerClient.Delete(ctx, second) },
+		} {
+			if err := change(); err != nil {
+				t.Fatal(err)
+			}
+			reconcile()
+			if err := serviceClient.Get(ctx, client.ObjectKeyFromObject(&issued), &issued); err != nil {
+				t.Fatal(err)
+			}
+			if err := serviceClient.Get(ctx, client.ObjectKeyFromObject(stored), stored); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(beforeCertificate, &issued) || !reflect.DeepEqual(beforeSecret, stored) {
+				t.Fatal("binding change mutated issuance resources or stored key pair")
+			}
+			if tc.UID != beforeRequest.UID || !reflect.DeepEqual(tc.Spec, beforeRequest.Spec) || tc.Status.CertificateRevision != beforeRequest.Status.CertificateRevision || !reflect.DeepEqual(tc.Status.RequiredDNSRecords, beforeRequest.Status.RequiredDNSRecords) {
+				t.Fatal("binding change altered shared request identity, revision or challenge CNAME")
+			}
+		}
+	})
 	unavailable = true
 	reconcile()
 	assertSuspended()
@@ -127,5 +187,27 @@ func TestManagedAuthorizationReconcileRetryAndSuspension(t *testing.T) {
 	var projectSecrets corev1.SecretList
 	if err := projectClient.List(ctx, &projectSecrets); err != nil || len(projectSecrets.Items) != 0 {
 		t.Fatalf("project received secrets: %v", err)
+	}
+}
+
+func managedIssuedSecret(t *testing.T, name, namespace string, request *certificates.TLSCertificate) *corev1.Secret {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{string(request.Spec.DNSNames[0])}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: map[string]string{UpstreamUIDLabel: string(request.UID)}},
+		Type:       corev1.SecretTypeTLS,
+		Data:       map[string][]byte{corev1.TLSCertKey: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), corev1.TLSPrivateKeyKey: pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})},
 	}
 }

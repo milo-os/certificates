@@ -137,6 +137,27 @@ managed suffix is also denied to ordinary requests, even if omitted from
 Connect owns this reservation in its service-provider Project (not a customer
 Project), in the same configured namespace as the TLSCertificate:
 
+The gateway endpoint is independent of VPCs. Its reservation remains scoped to
+the customer Project, gateway and metro, not a network or network binding.
+`networkUID` and `assignment.vpcRef` are not part of this certificate contract.
+Adding, removing or recreating a network binding must preserve the reservation,
+TLSCertificate UID, hostname and challenge CNAME; it must not trigger issuance
+or rekey. Normal certificate renewal and explicit emergency rekey still apply.
+
+Customer-facing references use resource names. The UID fields below, the
+reservation UID in `managedAuthorization`, and the bound certificate UID are
+internal service-project identity pins, not customer configuration. Do not
+replace these pins with names: deletion and name reuse must not inherit issuance
+authority. Connect allocates opaque DNS labels without exposing raw resource
+UIDs; Certificates neither allocates hostnames nor derives them from UIDs.
+
+The shared certificate authenticates the gateway hostname for H3/H2 transport.
+It does not authorize any VPC or CONNECT-IP stream. Connect and Galactic must
+independently authorize each stream, including multiple streams over the same
+transport connection. Stream admission and binding revocation do not change
+certificate ownership. DNS/TLS requests stay in the service-provider Project;
+private keys remain in central issuance infrastructure and authorized cells.
+
 ```yaml
 apiVersion: connect.datumapis.com/v1alpha1
 kind: ConnectEndpoint
@@ -158,9 +179,11 @@ status:
 ```
 
 The tuple and hostname must be immutable in the Connect API. Connect must enforce
-hostname uniqueness, prevent reallocation to another tuple, and make
-`Active -> Deleting -> Retired` irreversible. Both `spec.lifecycle` and
-`status.phase` must equal `Active`; stale Active status cannot override deletion
+hostname uniqueness and prevent reallocation to another tuple. Deletion must
+complete before Connect may reactivate the same live gateway identity: remove
+the old keys and certificate request and retire its grants before rebinding a
+new certificate UID. Network binding churn is not endpoint retirement. Both
+`spec.lifecycle` and `status.phase` must equal `Active`; stale Active status cannot override deletion
 intent. Certificates checks the exact reservation UID, nonempty tuple, exact
 hostname and certificate name, and rejects a deleting reservation.
 

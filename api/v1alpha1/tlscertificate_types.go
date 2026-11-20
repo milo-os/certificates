@@ -89,7 +89,11 @@ const (
 // TLSCertificateSpec defines the desired state of TLSCertificate.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.issuance) || self.issuance != 'HTTP01' || !self.dnsNames.exists(n, n.startsWith('*.'))",message="wildcard names require DNS01 or Auto issuance"
+// +kubebuilder:validation:XValidation:rule="has(self.managedAuthorization) == has(oldSelf.managedAuthorization)",message="managedAuthorization is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(self.managedAuthorization) || self.managedAuthorization == oldSelf.managedAuthorization",message="managedAuthorization is immutable"
 type TLSCertificateSpec struct {
+	// +optional
+	ManagedAuthorization *ManagedAuthorization `json:"managedAuthorization,omitempty"`
 	// DNSNames are the hostnames the certificate covers. Each name is a
 	// lowercase RFC 1123 hostname. A name may start with a single "*." label
 	// to cover exactly one additional label; "*" is not allowed anywhere else.
@@ -113,6 +117,13 @@ type TLSCertificateSpec struct {
 	// +kubebuilder:default=Auto
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="issuance is immutable"
 	Issuance IssuanceMode `json:"issuance,omitempty"`
+}
+
+type ManagedAuthorization struct {
+	// +kubebuilder:validation:MinLength=1
+	ReservationName string `json:"reservationName"`
+	// +kubebuilder:validation:MinLength=1
+	ReservationUID string `json:"reservationUID"`
 }
 
 // DNSName is a lowercase RFC 1123 hostname, optionally prefixed with "*.".
@@ -166,6 +177,9 @@ type ACMEChallenge struct {
 
 // TLSCertificateStatus defines the observed state of TLSCertificate.
 type TLSCertificateStatus struct {
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{64}$`
+	CertificateRevision string `json:"certificateRevision,omitempty"`
 	// Issuance is the resolved issuance mode.
 	//
 	// +optional

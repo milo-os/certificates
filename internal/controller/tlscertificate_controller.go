@@ -40,6 +40,7 @@ import (
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
 	certificatesv1alpha1 "go.miloapis.com/certificates/api/v1alpha1"
+	"go.miloapis.com/certificates/internal/managedconnect"
 	"go.miloapis.com/certificates/internal/validation"
 )
 
@@ -77,6 +78,7 @@ var knownConditions = []string{
 // which is CertManager when set and the local cluster otherwise. The issued key
 // pair stays on the cert-manager cluster and is never written to a project.
 type TLSCertificateReconciler struct {
+	ManagedConnect       *managedconnect.Authorizer
 	CertificateNamespace string
 	HTTP01ClusterIssuer  string
 	DNS01ClusterIssuer   string
@@ -203,6 +205,14 @@ func (r *TLSCertificateReconciler) computeStatus(
 	}
 
 	issuer, reason, msg := r.issuerFor(tc, mode)
+	if tc.Spec.ManagedAuthorization != nil {
+		result.RequeueAfter = r.delegationRecheckInterval()
+		if err := r.ManagedConnect.Verify(ctx, tc, string(clusterName), true); err != nil {
+			issuer, reason, msg = "", "ManagedAuthorizationDenied", err.Error()
+		} else {
+			issuer, reason, msg = r.issuerForSuffixes(tc, mode, []string{r.DNS01DelegationZone})
+		}
+	}
 	if issuer == "" {
 		if err := r.suspend(ctx, cert); err != nil {
 			return ctrl.Result{}, err
@@ -287,7 +297,15 @@ func (r *TLSCertificateReconciler) computeStatus(
 }
 
 func (r *TLSCertificateReconciler) issuerFor(tc *certificatesv1alpha1.TLSCertificate, mode certificatesv1alpha1.ChallengeType) (string, string, string) {
-	if errs := validation.ValidateSpec(tc.Spec, field.NewPath("spec"), r.deniedSuffixes()); len(errs) > 0 {
+	denied := r.deniedSuffixes()
+	if r.ManagedConnect != nil {
+		denied = append(slices.Clone(denied), r.ManagedConnect.DomainSuffix)
+	}
+	return r.issuerForSuffixes(tc, mode, denied)
+}
+
+func (r *TLSCertificateReconciler) issuerForSuffixes(tc *certificatesv1alpha1.TLSCertificate, mode certificatesv1alpha1.ChallengeType, denied []string) (string, string, string) {
+	if errs := validation.ValidateSpec(tc.Spec, field.NewPath("spec"), denied); len(errs) > 0 {
 		return "", "InvalidSpec", truncate(errs.ToAggregate().Error())
 	}
 	switch mode {
@@ -586,6 +604,7 @@ func (r *TLSCertificateReconciler) syncIssued(
 
 	notBefore, notAfter := metav1.NewTime(leaf.NotBefore), metav1.NewTime(leaf.NotAfter)
 	tc.Status.NotBefore, tc.Status.NotAfter = &notBefore, &notAfter
+	tc.Status.CertificateRevision = certificatesv1alpha1.CertificateRevision(leaf.Raw)
 
 	if !time.Now().Before(leaf.NotAfter) {
 		r.setCondition(tc, certificatesv1alpha1.ConditionReady, metav1.ConditionFalse, "Expired", "The certificate has expired.")

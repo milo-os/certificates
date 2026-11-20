@@ -22,9 +22,10 @@ spec:
   HTTP01 cannot issue wildcards.
 - The service does not verify that the project controls the names. Callers
   create a `TLSCertificate` only for names they have already verified. Names
-  under `--denied-domain-suffixes` and the DNS01 delegation zone are always
-  rejected, as are public suffixes and names whose top-level domain is not a
-  public ICANN domain.
+  under `--denied-domain-suffixes` are rejected unless explicitly authorized by
+  the reservation-bound managed Connect path below. The DNS01 delegation zone,
+  public suffixes and names whose top-level domain is not a public ICANN domain
+  are always rejected.
 - HTTP01: the consumer serves each entry in `status.challenges` at
   `http://<dnsName>/.well-known/acme-challenge/<token>` with body `<key>`.
 - DNS01: the service assigns each name a random delegation target, listed in
@@ -47,7 +48,8 @@ spec:
   `certificates_dns01_delegation_unconfirmed_seconds` metric reports how long
   each certificate has gone unconfirmed; alert on it passing an hour. The
   current certificate keeps being served while suspended.
-- `dnsNames` and `issuance` are immutable.
+- `dnsNames`, `issuance` and `managedAuthorization` (including its presence)
+  are immutable.
 - The key pair is never written to the project control plane, so no project
   user can read the private key, and the API does not name where it is held.
   Once issued, `Ready` turns `True` and `status.notBefore` and
@@ -108,8 +110,150 @@ or the service cluster when unset) finds the key pair at:
 
 The Secret is `kubernetes.io/tls` and carries the label
 `certificates.miloapis.com/upstream-uid: <uid>`; check it before use. Wait for
-`Ready=True`, and treat a change in `status.notAfter` as the signal that a
-renewal has replaced the key pair.
+`Ready=True`, and treat a change in `status.certificateRevision` as the signal
+that the stored certificate has changed. This is the lowercase, 64-character
+hex SHA-256 of the leaf certificate's DER bytes, also available as
+`CertificateRevision(leaf.Raw)` in the API package. It is not a hash of PEM,
+the chain or the private key, and it is not an ordered sequence number.
+
+Before delivery, verify the stored Secret's UID label, exact SAN set, matching
+private key and current validity. Compute the leaf fingerprint and require it
+to equal the current status revision; a Secret write and a project status write
+are not atomic. On mismatch or unavailable status, retry rather than delivering
+an obsolete version. Re-read current desired state before acknowledging delivery.
+Same-expiry renewals and later-issued shorter-lived rekeys change the revision.
+An older or equal-NotBefore candidate cannot replace the stored certificate;
+expiry is never used to order replacements. Existing consumers can continue
+reading validity dates, but must adopt the revision for reliable rotation.
+
+## Managed Connect authorization
+
+This opt-in path issues one nonwildcard hostname per trusted Connect reservation.
+It does not authorize an entire service project or grant a suffix allowlist.
+Unconfigured deployments retain protected-domain rejection. When configured, the
+managed suffix is also denied to ordinary requests, even if omitted from
+`--denied-domain-suffixes`. The DNS01 delegation zone never receives an exception.
+
+Connect owns this reservation in its service-provider Project (not a customer
+Project), in the same configured namespace as the TLSCertificate:
+
+The gateway endpoint is independent of VPCs. Its reservation remains scoped to
+the customer Project, gateway and metro, not a network or network binding.
+`networkUID` and `assignment.vpcRef` are not part of this certificate contract.
+Adding, removing or recreating a network binding must preserve the reservation,
+TLSCertificate UID, hostname and challenge CNAME; it must not trigger issuance
+or rekey. Normal certificate renewal and explicit emergency rekey still apply.
+
+Customer-facing references use resource names. The UID fields below, the
+reservation UID in `managedAuthorization`, and the bound certificate UID are
+internal service-project identity pins, not customer configuration. Do not
+replace these pins with names: deletion and name reuse must not inherit issuance
+authority. Connect allocates opaque DNS labels without exposing raw resource
+UIDs; Certificates neither allocates hostnames nor derives them from UIDs.
+
+The shared certificate authenticates the gateway hostname for H3/H2 transport.
+It does not authorize any VPC or CONNECT-IP stream. Connect and Galactic must
+independently authorize each stream, including multiple streams over the same
+transport connection. Stream admission and binding revocation do not change
+certificate ownership. DNS/TLS requests stay in the service-provider Project;
+private keys remain in central issuance infrastructure and authorized cells.
+
+```yaml
+apiVersion: connect.datumapis.com/v1alpha1
+kind: ConnectEndpoint
+metadata:
+  name: endpoint
+  namespace: connect
+  uid: <reservation-uid-assigned-by-api>
+spec:
+  customerProjectUID: <customer-project-uid>
+  gatewayUID: <gateway-uid>
+  metro: <metro-id>
+  hostname: opaque.connect.example.com
+  lifecycle: Active
+status:
+  certificateRef:
+    name: endpoint
+    uid: <tlscertificate-uid-assigned-by-api>
+```
+
+The tuple and hostname must be immutable in the Connect API. Connect must enforce
+hostname uniqueness and prevent reallocation to another tuple. Deletion must
+complete before Connect may reactivate the same live gateway identity: remove
+the old keys and certificate request and retire its grants before rebinding a
+new certificate UID. Network binding churn is not endpoint retirement.
+`spec.lifecycle` must equal `Active`; missing or non-Active lifecycle fails closed.
+Legacy `status.phase` is ignored and cannot override deletion intent. Ready
+conditions are descriptive, not authorization gates: issuance precedes readiness.
+Certificates checks the exact reservation UID, nonempty tuple, exact
+hostname and certificate name, and rejects a deleting reservation.
+
+Upgrade Certificates to this lifecycle-only reader before removing phase from
+the Connect schema and controller. Existing reservations already have lifecycle;
+both legacy reservations with phase and new reservations without it are accepted
+under the same identity checks. Never fall back to phase when lifecycle is absent
+or non-Active. No CLI flag, RBAC or TLSCertificate schema changes are required.
+
+```yaml
+apiVersion: certificates.miloapis.com/v1alpha1
+kind: TLSCertificate
+metadata:
+  name: endpoint
+  namespace: connect
+spec:
+  dnsNames: [opaque.connect.example.com]
+  issuance: DNS01
+  managedAuthorization:
+    reservationName: endpoint
+    reservationUID: <reservation-uid-assigned-by-api>
+```
+
+Provisioning is retry-safe: create the reservation with Active lifecycle, set
+`status.certificateRef.name`, create or retrieve the exact TLSCertificate, then
+bind its returned UID into `status.certificateRef.uid`. Admission permits an
+unbound reservation for bootstrap, but rejects one bound to a different UID.
+The controller cannot issue until the UID binding is present. A recreated
+certificate has a new UID and cannot inherit an old authorization. Connect
+must validate an existing object's spec before binding its UID.
+
+Admission requires the exact configured Connect writer username and Milo's
+authenticated `UserInfo.Extra` values `iam.miloapis.com/parent-type: [Project]`
+and `iam.miloapis.com/parent-name: [<configured-project-name>]`. Missing,
+ambiguous or mismatched context fails closed. This uses the same keys as Milo's
+cluster-aware webhook; annotations and object labels are not authentication.
+These checks remain enabled when ordinary writer identity restrictions are
+disabled. The controller independently compares its discovered cluster name,
+namespace, reservation and bound certificate UID before issuance and renewal.
+
+Both components read the reservation directly, without an informer cache, using
+a dedicated kubeconfig pinned to the service-provider Project. The request cannot
+select this client. Grant its identity (`system:managed-connect-reader@certificates.miloapis.com`)
+only `get` on `connect.datumapis.com/connectendpoints` in the configured namespace.
+Only the trusted Connect controller may mutate reservation spec or status;
+customers must have neither those permissions nor impersonation rights for the
+writer or Milo context. The writer is
+`system:managed-endpoints@connect.datumapis.com`. The webhook must be installed
+with fail-closed admission; enforce these RBAC and authenticated-context
+boundaries in the deployment. A reference to a resource customers can write is
+not a capability.
+
+Authorization is rechecked at most one minute after the preceding successful
+reconcile by default. Missing binding, inactive/deleted reservations and read
+failures set `Accepted=False` (`ManagedAuthorizationDenied`), suspend the
+cert-manager Certificate and retry. The stored Secret remains untouched. This
+does not revoke an issued certificate or terminate existing sessions; Connect
+and Galactic own endpoint withdrawal and session revocation. ACME work already
+in flight is not an atomic transaction with the reservation API.
+
+Connect publishes the exact challenge CNAME from `status.requiredDNSRecords`;
+the existing DNS01 issuer handles delegated TXT. No private key or issuance
+Secret is written into either Project. Runtime delivery remains a consumer
+responsibility. Prefer named-Secret `get` RBAC. If dynamic names require
+namespace-wide `get`, it grants access to every known Secret name in that
+namespace; label filtering is not an authorization boundary. No `list` or
+`watch` permission is needed for polling. `--certificate-namespace` selects the
+entire operator's issuance/storage namespace, not a managed-only subnamespace;
+do not deploy a second competing reconciler merely to isolate managed Secrets.
 
 ## Flags
 
@@ -119,8 +263,13 @@ renewal has replaced the key pair.
 | `--http01-cluster-issuer` | empty | cert-manager ClusterIssuer for HTTP01. HTTP01 requests are not accepted when empty |
 | `--dns01-cluster-issuer` | empty | cert-manager ClusterIssuer for DNS01. It must follow CNAMEs (`cnameStrategy: Follow`) and be able to write only to the delegation zone |
 | `--dns01-delegation-zone` | empty | Zone the DNS01 issuer writes challenge records into. Required with `--dns01-cluster-issuer` |
-| `--denied-domain-suffixes` | `datumproxy.net,datum.net,datum-staging.net,datumdomains.net,miloapis.com,datumapis.com` | Domains never issued for, including every name beneath them |
-| `--allowed-writer-identities` | `system:control@networking.datumapis.com` | Usernames allowed to create, change or delete a `TLSCertificate`. Empty turns off every identity check except the status one |
+| `--denied-domain-suffixes` | `datumproxy.net,datum.net,datum-staging.net,datumdomains.net,miloapis.com,datumapis.com` | Protected domains, including every name beneath them; only reservation-bound managed issuance can receive an exception |
+| `--managed-connect-kubeconfig` | empty | Dedicated read-only kubeconfig pinned to the trusted service-provider Project |
+| `--managed-connect-cluster-name` | empty | Exact Milo Project name in discovery and authenticated admission context |
+| `--managed-connect-namespace` | empty | Namespace containing trusted ConnectEndpoints and TLSCertificates |
+| `--managed-connect-domain-suffix` | empty | Canonical lowercase managed domain boundary; reservations are still required |
+| `--managed-connect-writer-identities` | empty | Exact admission usernames allowed to request managed issuance |
+| `--allowed-writer-identities` | `system:control@networking.datumapis.com` | Ordinary writer usernames. Empty disables ordinary identity checks, but not status or managed issuance checks |
 | `--service-identities` | empty | The service's usernames in project control planes. Only they may write status. Required when the webhook is enabled |
 | `--allowed-deleter-identities` | `system:control@platform.miloapis.com`, kube-system namespace-controller and generic-garbage-collector | Extra usernames allowed to delete a `TLSCertificate` and make metadata-only changes, such as removing finalizers: whatever deletes namespaces and collects garbage in project control planes. Milo's controller manager uses `system:control@platform.miloapis.com`. Preview environments use `control@platform.miloapis.com`, without the `system:` prefix, and must override this flag. The kube-system ServiceAccounts apply only to a stock kube-controller-manager |
 | `--max-concurrent-reconciles` | `8` | TLSCertificates reconciled in parallel |
@@ -131,6 +280,13 @@ renewal has replaced the key pair.
 
 Point the issuers at the ACME staging endpoint in non-production environments;
 the service never hardcodes an ACME server.
+
+All five `--managed-connect-*` flags must be supplied together, along with the
+DNS01 issuer and delegation zone. They are CLI flags alongside
+`--server-config=/config/config.yaml`, not fields in that YAML. Configure both
+admission and controller deployments consistently. The reader kubeconfig can
+be mounted at `/etc/certificates/managed-connect/kubeconfig.yaml`; its credentials
+must not grant project writes or Secret access.
 
 ## Operator config
 

@@ -172,7 +172,6 @@ spec:
   hostname: opaque.connect.example.com
   lifecycle: Active
 status:
-  phase: Active
   certificateRef:
     name: endpoint
     uid: <tlscertificate-uid-assigned-by-api>
@@ -182,10 +181,18 @@ The tuple and hostname must be immutable in the Connect API. Connect must enforc
 hostname uniqueness and prevent reallocation to another tuple. Deletion must
 complete before Connect may reactivate the same live gateway identity: remove
 the old keys and certificate request and retire its grants before rebinding a
-new certificate UID. Network binding churn is not endpoint retirement. Both
-`spec.lifecycle` and `status.phase` must equal `Active`; stale Active status cannot override deletion
-intent. Certificates checks the exact reservation UID, nonempty tuple, exact
+new certificate UID. Network binding churn is not endpoint retirement.
+`spec.lifecycle` must equal `Active`; missing or non-Active lifecycle fails closed.
+Legacy `status.phase` is ignored and cannot override deletion intent. Ready
+conditions are descriptive, not authorization gates: issuance precedes readiness.
+Certificates checks the exact reservation UID, nonempty tuple, exact
 hostname and certificate name, and rejects a deleting reservation.
+
+Upgrade Certificates to this lifecycle-only reader before removing phase from
+the Connect schema and controller. Existing reservations already have lifecycle;
+both legacy reservations with phase and new reservations without it are accepted
+under the same identity checks. Never fall back to phase when lifecycle is absent
+or non-Active. No CLI flag, RBAC or TLSCertificate schema changes are required.
 
 ```yaml
 apiVersion: certificates.miloapis.com/v1alpha1
@@ -201,7 +208,7 @@ spec:
     reservationUID: <reservation-uid-assigned-by-api>
 ```
 
-Provisioning is retry-safe: create the reservation, set Active phase and
+Provisioning is retry-safe: create the reservation with Active lifecycle, set
 `status.certificateRef.name`, create or retrieve the exact TLSCertificate, then
 bind its returned UID into `status.certificateRef.uid`. Admission permits an
 unbound reservation for bootstrap, but rejects one bound to a different UID.

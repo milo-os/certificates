@@ -41,7 +41,7 @@ func TestManagedAuthorizationReconcileRetryAndSuspension(t *testing.T) {
 		"apiVersion": "connect.datumapis.com/v1alpha1", "kind": "ConnectEndpoint",
 		"metadata": map[string]interface{}{"name": "endpoint", "namespace": "connect", "uid": "reservation-uid"},
 		"spec":     map[string]interface{}{"customerProjectUID": "customer", "gatewayUID": "gateway", "metro": "dfw", "hostname": "opaque.connect.datum.net", "lifecycle": "Active"},
-		"status":   map[string]interface{}{"phase": "Active", "certificateRef": map[string]interface{}{"name": "endpoint"}},
+		"status":   map[string]interface{}{"certificateRef": map[string]interface{}{"name": "endpoint"}},
 	}}
 	unavailable := false
 	reservationClient := fake.NewClientBuilder().WithObjects(endpoint).WithInterceptorFuncs(interceptor.Funcs{

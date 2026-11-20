@@ -20,7 +20,7 @@ func reservation() *unstructured.Unstructured {
 		"apiVersion": EndpointGVK.GroupVersion().String(), "kind": EndpointGVK.Kind,
 		"metadata": map[string]interface{}{"name": "endpoint", "namespace": "connect", "uid": "reservation-uid"},
 		"spec":     map[string]interface{}{"customerProjectUID": "customer-uid", "gatewayUID": "gateway-uid", "metro": "dfw", "hostname": "opaque.connect.example.com", "lifecycle": "Active"},
-		"status":   map[string]interface{}{"phase": "Active", "certificateRef": map[string]interface{}{"name": "endpoint", "uid": "certificate-uid"}},
+		"status":   map[string]interface{}{"certificateRef": map[string]interface{}{"name": "endpoint", "uid": "certificate-uid"}},
 	}}
 }
 
@@ -99,11 +99,11 @@ func TestReservationAuthorization(t *testing.T) {
 			}
 		})
 	}
-	for _, fields := range [][]string{{"spec", "customerProjectUID"}, {"spec", "gatewayUID"}, {"spec", "metro"}, {"spec", "lifecycle"}, {"status", "phase"}} {
+	for _, fields := range [][]string{{"spec", "customerProjectUID"}, {"spec", "gatewayUID"}, {"spec", "metro"}, {"spec", "lifecycle"}} {
 		t.Run(strings.Join(fields, "."), func(t *testing.T) {
 			for _, replacement := range []string{"", "Deleting", "Retired"} {
 				endpoint := reservation()
-				if fields[1] == "lifecycle" || fields[1] == "phase" || replacement == "" {
+				if fields[1] == "lifecycle" || replacement == "" {
 					_ = unstructured.SetNestedField(endpoint.Object, replacement, fields...)
 					auth := &Authorizer{Namespace: "connect", ClusterName: "service-project", DomainSuffix: "connect.example.com", Reader: fake.NewClientBuilder().WithObjects(endpoint).Build()}
 					if err := auth.Verify(context.Background(), certificate(), "service-project", true); err == nil {
@@ -112,6 +112,37 @@ func TestReservationAuthorization(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLifecycleAuthorizationIgnoresLegacyPhaseAndReadiness(t *testing.T) {
+	for _, lifecycle := range []string{"Active", "Deleting", "Retired", "", "Unknown", "absent"} {
+		for _, phase := range []string{"absent", "Active", "Deleting", "Retired"} {
+			t.Run(lifecycle+"/"+phase, func(t *testing.T) {
+				endpoint := reservation()
+				if lifecycle == "absent" {
+					unstructured.RemoveNestedField(endpoint.Object, "spec", "lifecycle")
+				} else if err := unstructured.SetNestedField(endpoint.Object, lifecycle, "spec", "lifecycle"); err != nil {
+					t.Fatal(err)
+				}
+				if phase != "absent" {
+					if err := unstructured.SetNestedField(endpoint.Object, phase, "status", "phase"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				conditions := []interface{}{map[string]interface{}{"type": "Ready", "status": "False", "reason": "CertificatePending"}}
+				if err := unstructured.SetNestedSlice(endpoint.Object, conditions, "status", "conditions"); err != nil {
+					t.Fatal(err)
+				}
+				auth := &Authorizer{Namespace: "connect", ClusterName: "service-project", DomainSuffix: "connect.example.com", Reader: fake.NewClientBuilder().WithObjects(endpoint).Build()}
+				for _, requireUID := range []bool{false, true} {
+					err := auth.Verify(context.Background(), certificate(), "service-project", requireUID)
+					if (err == nil) != (lifecycle == "Active") {
+						t.Fatalf("unexpected authorization (requireUID=%t): %v", requireUID, err)
+					}
+				}
+			})
+		}
 	}
 }
 

@@ -55,7 +55,7 @@ func (a *Authorizer) Verify(ctx context.Context, tc *certificates.TLSCertificate
 			return errors.New("managed Connect reservation ownership tuple is incomplete")
 		}
 	}
-	if value(endpoint, "spec", "hostname") != hostname || value(endpoint, "spec", "lifecycle") != "Active" || value(endpoint, "status", "phase") != "Active" || value(endpoint, "status", "certificateRef", "name") != tc.Name {
+	if value(endpoint, "spec", "hostname") != hostname || value(endpoint, "spec", "lifecycle") != "Active" || value(endpoint, "status", "certificateRef", "name") != tc.Name {
 		return errors.New("managed Connect reservation does not authorize this certificate")
 	}
 	boundUID := value(endpoint, "status", "certificateRef", "uid")

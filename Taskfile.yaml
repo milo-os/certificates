@@ -8,7 +8,9 @@ vars:
   TEST_INFRA_REPO_REF: 'v0.6.0'
   CONTROLLER_TOOLS_VERSION: "v0.16.4"
   DEFAULTER_GEN_VERSION: "v0.32.3"
+  # renovate: datasource=github-releases depName=golangci/golangci-lint
   GOLANGCI_LINT_VERSION: "v2.15.0"
+  # renovate: datasource=github-releases depName=kyverno/chainsaw
   CHAINSAW_VERSION: "v0.2.15"
 
 includes:

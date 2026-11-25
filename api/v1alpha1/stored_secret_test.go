@@ -21,3 +21,9 @@ func TestStoredSecretName(t *testing.T) {
 		t.Fatalf("different UIDs share the name %q", got)
 	}
 }
+
+func TestCertificateRevision(t *testing.T) {
+	if got := CertificateRevision([]byte("abc")); got != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
+		t.Fatalf("revision must be lowercase hex SHA256 of the supplied leaf DER, got %q", got)
+	}
+}

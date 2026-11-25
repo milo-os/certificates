@@ -481,6 +481,26 @@ var _ = Describe("TLSCertificate reconciler", func() {
 		Eventually(get(recreated)).Should(HaveField("Status.DelegationTarget", And(Not(BeEmpty()), Not(Equal(before)))))
 	})
 
+	It("keeps the managed reservation capability immutable, including presence", func() {
+		tc := newTLSCertificate(ns, "managed-immutable", certificatesv1alpha1.IssuanceModeDNS01, "opaque.connect.datum.net")
+		tc.Spec.ManagedAuthorization = &certificatesv1alpha1.ManagedAuthorization{ReservationName: "endpoint", ReservationUID: "reservation-uid"}
+		Expect(k8sClient.Create(ctx, tc)).To(Succeed())
+		Eventually(get(tc)).Should(hasCondition(certificatesv1alpha1.ConditionAccepted, metav1.ConditionFalse, "ManagedAuthorizationDenied"))
+		for _, ref := range []*certificatesv1alpha1.ManagedAuthorization{nil, {ReservationName: "other", ReservationUID: "reservation-uid"}, {ReservationName: "endpoint", ReservationUID: "other"}} {
+			current := get(tc)(Default)
+			current.Spec.ManagedAuthorization = ref
+			Expect(apierrors.IsInvalid(k8sClient.Update(ctx, current))).To(BeTrue())
+		}
+		ordinary := newTLSCertificate(ns, "ordinary-immutable", certificatesv1alpha1.IssuanceModeDNS01, "ordinary.example.com")
+		Expect(k8sClient.Create(ctx, ordinary)).To(Succeed())
+		Eventually(func(g Gomega) {
+			current := get(ordinary)(g)
+			current.Spec.ManagedAuthorization = tc.Spec.ManagedAuthorization
+			err := k8sClient.Update(ctx, current)
+			g.Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected immutable capability rejection, got %v", err)
+		}).Should(Succeed())
+	})
+
 	It("replaces the stored copy only with a newer, matching issuance and reports each new expiry", func() {
 		tc := newTLSCertificate(ns, "rotate", certificatesv1alpha1.IssuanceModeAuto, "rotate.example.com")
 		Expect(k8sClient.Create(ctx, tc)).To(Succeed())
@@ -515,11 +535,25 @@ var _ = Describe("TLSCertificate reconciler", func() {
 			return got.Status.NotAfter.Time
 		}
 		now := time.Now().Truncate(time.Second)
+		revision := func(g Gomega) string { return get(tc)(g).Status.CertificateRevision }
+		fingerprint := func(crt []byte) string {
+			leaf, err := parseLeaf(crt)
+			Expect(err).NotTo(HaveOccurred())
+			return certificatesv1alpha1.CertificateRevision(leaf.Raw)
+		}
 
 		By("storing the first issuance")
 		first, firstKey := selfSignedPEMAt(now.Add(-48*time.Hour), now.Add(60*24*time.Hour), "rotate.example.com")
 		write(first, firstKey)
 		Eventually(storedCopy).Should(Equal(first))
+		Eventually(notAfter).Should(BeTemporally("==", now.Add(60*24*time.Hour)))
+		Eventually(revision).Should(Equal(fingerprint(first)))
+		By("reporting a same-expiry replacement with a different revision")
+		sameExpiry, sameExpiryKey := selfSignedPEMAt(now.Add(-36*time.Hour), now.Add(60*24*time.Hour), "rotate.example.com")
+		write(sameExpiry, sameExpiryKey)
+		Eventually(storedCopy).Should(Equal(sameExpiry))
+		Eventually(revision).Should(Equal(fingerprint(sameExpiry)))
+		Expect(fingerprint(sameExpiry)).NotTo(Equal(fingerprint(first)))
 		Eventually(notAfter).Should(BeTemporally("==", now.Add(60*24*time.Hour)))
 
 		By("replacing it with a renewal and reporting the new expiry")
@@ -527,12 +561,14 @@ var _ = Describe("TLSCertificate reconciler", func() {
 		write(renewed, renewedKey)
 		Eventually(storedCopy).Should(Equal(renewed))
 		Eventually(notAfter).Should(BeTemporally("==", now.Add(90*24*time.Hour)))
+		Eventually(revision).Should(Equal(fingerprint(renewed)))
 
 		By("adopting an emergency re-key with a shorter lifetime")
 		rekeyed, rekeyedKey := selfSignedPEMAt(now.Add(-time.Hour), now.Add(7*24*time.Hour), "rotate.example.com")
 		write(rekeyed, rekeyedKey)
 		Eventually(storedCopy).Should(Equal(rekeyed))
 		Eventually(notAfter).Should(BeTemporally("==", now.Add(7*24*time.Hour)))
+		Eventually(revision).Should(Equal(fingerprint(rekeyed)))
 
 		By("refusing an older issuance")
 		older, olderKey := selfSignedPEMAt(now.Add(-72*time.Hour), now.Add(120*24*time.Hour), "rotate.example.com")

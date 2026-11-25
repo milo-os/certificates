@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -26,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -44,6 +46,7 @@ import (
 	certificatesv1alpha1 "go.miloapis.com/certificates/api/v1alpha1"
 	"go.miloapis.com/certificates/internal/config"
 	"go.miloapis.com/certificates/internal/controller"
+	"go.miloapis.com/certificates/internal/managedconnect"
 	webhookv1alpha1 "go.miloapis.com/certificates/internal/webhook/v1alpha1"
 )
 
@@ -62,17 +65,19 @@ func init() {
 }
 
 type issuanceFlags struct {
-	certificateNamespace string
-	http01ClusterIssuer  string
-	dns01ClusterIssuer   string
-	dns01DelegationZone  string
-	dnsResolverAddress   string
-	deniedDomainSuffixes []string
-	writerIdentities     []string
-	serviceIdentities    []string
-	deleterIdentities    []string
-	maxConcurrent        int
-	maxUnconfirmed       time.Duration
+	managedConnectKubeconfig string
+	managedConnect           managedconnect.Authorizer
+	certificateNamespace     string
+	http01ClusterIssuer      string
+	dns01ClusterIssuer       string
+	dns01DelegationZone      string
+	dnsResolverAddress       string
+	deniedDomainSuffixes     []string
+	writerIdentities         []string
+	serviceIdentities        []string
+	deleterIdentities        []string
+	maxConcurrent            int
+	maxUnconfirmed           time.Duration
 }
 
 func (f issuanceFlags) denied() []string {
@@ -83,6 +88,26 @@ func (f issuanceFlags) denied() []string {
 }
 
 func (f issuanceFlags) validate() error {
+	managed := f.managedConnect
+	if f.managedConnectKubeconfig != "" || managed.ClusterName != "" || managed.Namespace != "" || managed.DomainSuffix != "" || len(managed.WriterIdentities) != 0 {
+		if f.managedConnectKubeconfig == "" || managed.ClusterName == "" || managed.Namespace == "" || managed.DomainSuffix == "" || len(managed.WriterIdentities) == 0 {
+			return errors.New("all --managed-connect-* flags are required together")
+		}
+		if f.dns01ClusterIssuer == "" || f.dns01DelegationZone == "" {
+			return errors.New("managed Connect issuance requires the DNS01 issuer and delegation zone")
+		}
+		if len(kvalidation.IsDNS1123Subdomain(managed.DomainSuffix)) != 0 || !strings.Contains(managed.DomainSuffix, ".") {
+			return errors.New("managed Connect domain suffix must be a lowercase DNS domain with at least two labels")
+		}
+		if len(kvalidation.IsDNS1123Label(managed.Namespace)) != 0 {
+			return errors.New("managed Connect namespace must be a valid namespace name")
+		}
+		for _, identity := range managed.WriterIdentities {
+			if strings.TrimSpace(identity) == "" {
+				return errors.New("managed Connect writer identities must not be empty")
+			}
+		}
+	}
 	if f.certificateNamespace == "" {
 		return errors.New("--certificate-namespace is required")
 	}
@@ -227,7 +252,12 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 				}
 			}
 
+			managedConnect, err := issuance.managedAuthorizer()
+			if err != nil {
+				return err
+			}
 			if err := (&controller.TLSCertificateReconciler{
+				ManagedConnect:          managedConnect,
 				CertificateNamespace:    issuance.certificateNamespace,
 				HTTP01ClusterIssuer:     issuance.http01ClusterIssuer,
 				DNS01ClusterIssuer:      issuance.dns01ClusterIssuer,
@@ -252,6 +282,7 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 
 			if serverConfig.WebhookServer != nil {
 				if err := webhookv1alpha1.SetupWebhookWithManager(mgr.GetLocalManager(), &webhookv1alpha1.Validator{
+					ManagedConnect:       managedConnect,
 					DeniedDomainSuffixes: issuance.denied(),
 					WriterIdentities:     issuance.writerIdentities,
 					ServiceIdentities:    issuance.serviceIdentities,
@@ -299,9 +330,9 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 	cmd.Flags().StringVar(&issuance.dns01DelegationZone, "dns01-delegation-zone", "",
 		"DNS zone the DNS01 issuer writes challenge records into. Each name's _acme-challenge record must be a CNAME to the random target listed in the TLSCertificate's status.requiredDNSRecords, under this zone.")
 	cmd.Flags().StringSliceVar(&issuance.deniedDomainSuffixes, "denied-domain-suffixes", []string{"datumproxy.net", "datum.net", "datum-staging.net", "datumdomains.net", "miloapis.com", "datumapis.com"},
-		"Domains the service never issues for, including every name beneath them. The DNS01 delegation zone is always denied.")
+		"Protected domains, including names beneath them. Only reservation-bound managed issuance can receive an exception; the DNS01 delegation zone is always denied.")
 	cmd.Flags().StringSliceVar(&issuance.writerIdentities, "allowed-writer-identities", []string{"system:control@networking.datumapis.com"},
-		"Usernames allowed to create, change or delete TLSCertificates. Empty turns off every identity check except the status one.")
+		"Ordinary TLSCertificate writer usernames. Empty disables ordinary identity checks, but not status or managed issuance checks.")
 	cmd.Flags().StringSliceVar(&issuance.serviceIdentities, "service-identities", nil,
 		"Usernames this service uses in project control planes. Only they may write TLSCertificate status. Required when the admission webhook is enabled.")
 	cmd.Flags().StringSliceVar(&issuance.deleterIdentities, "allowed-deleter-identities",
@@ -313,11 +344,36 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 	cmd.Flags().StringVar(&issuance.dnsResolverAddress, "dns-resolver-address", "",
 		"host:port of the DNS server used to check DNS01 delegation. Uses the system resolvers when empty.")
 
+	cmd.Flags().StringVar(&issuance.managedConnectKubeconfig, "managed-connect-kubeconfig", "", "Read-only kubeconfig pinned to the trusted Connect service-provider Project.")
+	cmd.Flags().StringVar(&issuance.managedConnect.ClusterName, "managed-connect-cluster-name", "", "Exact trusted Connect Project name in Milo discovery and admission context.")
+	cmd.Flags().StringVar(&issuance.managedConnect.Namespace, "managed-connect-namespace", "", "Trusted ConnectEndpoint and TLSCertificate namespace.")
+	cmd.Flags().StringVar(&issuance.managedConnect.DomainSuffix, "managed-connect-domain-suffix", "", "Managed Connect hostname boundary; live reservation authorization is also required.")
+	cmd.Flags().StringSliceVar(&issuance.managedConnect.WriterIdentities, "managed-connect-writer-identities", nil, "Exact usernames permitted to request managed Connect certificates.")
+
 	zapFlags := flag.NewFlagSet("zap", flag.ContinueOnError)
 	opts.BindFlags(zapFlags)
 	cmd.Flags().AddGoFlagSet(zapFlags)
 
 	return cmd
+}
+
+func (f issuanceFlags) managedAuthorizer() (*managedconnect.Authorizer, error) {
+	if f.managedConnectKubeconfig == "" {
+		return nil, nil
+	}
+	cfg, err := clientcmd.BuildConfigFromFlags("", f.managedConnectKubeconfig)
+	if err != nil {
+		return nil, errors.New("loading managed Connect reader kubeconfig failed")
+	}
+	cfg.Timeout = 10 * time.Second
+	reader, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, errors.New("creating managed Connect reservation reader failed")
+	}
+	authorizer := f.managedConnect
+	authorizer.Reader = reader
+	authorizer.DelegationZone = f.dns01DelegationZone
+	return &authorizer, nil
 }
 
 func localCacheObjects(namespace string, separateCertManager bool) map[client.Object]cache.ByObject {
